@@ -1,3 +1,3 @@
-SUBDIRS = stripe afr dht
+SUBDIRS = raid5 stripe afr dht
 
 CLEANFILES = 
