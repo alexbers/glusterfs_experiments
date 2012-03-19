@@ -2,10 +2,10 @@
 xlator_LTLIBRARIES = raid5.la
 xlatordir = $(libdir)/glusterfs/$(PACKAGE_VERSION)/xlator/cluster
 
-stripe_la_LDFLAGS = -module -avoidversion
+raid5_la_LDFLAGS = -module -avoidversion
 
-stripe_la_SOURCES = raid5.c $(top_builddir)/xlators/lib/src/libxlator.c
-stripe_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la
+raid5_la_SOURCES = raid5.c $(top_builddir)/xlators/lib/src/libxlator.c
+raid5_la_LIBADD = $(top_builddir)/libglusterfs/src/libglusterfs.la
 
 noinst_HEADERS = raid5.h raid5-mem-types.h $(top_builddir)/xlators/lib/src/libxlator.h
 

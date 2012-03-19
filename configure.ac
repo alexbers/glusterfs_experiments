@@ -65,6 +65,8 @@ AC_CONFIG_FILES([Makefile
 		xlators/cluster/afr/src/Makefile
 		xlators/cluster/stripe/Makefile
 		xlators/cluster/stripe/src/Makefile
+    xlators/cluster/raid5/Makefile
+    xlators/cluster/raid5/src/Makefile
 		xlators/cluster/dht/Makefile
 		xlators/cluster/dht/src/Makefile
 		xlators/performance/Makefile

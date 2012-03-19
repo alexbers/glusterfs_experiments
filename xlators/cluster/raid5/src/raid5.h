@@ -32,7 +32,7 @@
 #include "common-utils.h"
 #include "compat.h"
 #include "compat-errno.h"
-#include "stripe-mem-types.h"
+#include "raid5-mem-types.h"
 #include "libxlator.h"
 #include <fnmatch.h>
 #include <signal.h>
@@ -157,6 +157,11 @@ struct stripe_local {
         size_t               readv_size;
         int32_t              entry_count;
         int32_t              node_index;
+
+        int32_t              full_block_start;
+        int32_t              req_block_start;
+        int32_t              req_block_end;
+
         int32_t              call_count;
         int32_t              wind_count; /* used instead of child_cound
                                             in case of read and write */
