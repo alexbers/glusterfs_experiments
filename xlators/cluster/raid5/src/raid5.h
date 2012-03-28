@@ -112,6 +112,7 @@ typedef struct _stripe_fd_ctx {
         off_t      stripe_size;
         int        stripe_count;
         int        static_array;
+        uint64_t   real_size;
         xlator_t **xl_array;
 } stripe_fd_ctx_t;
 
