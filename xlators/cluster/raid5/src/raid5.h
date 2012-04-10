@@ -108,6 +108,8 @@ struct readv_replies {
         struct iatt   stbuf;    /* 'stbuf' is also a part of reply */
 };
 
+
+
 typedef struct _stripe_fd_ctx {
         off_t      stripe_size;
         int        stripe_count;
@@ -198,10 +200,14 @@ struct stripe_local {
         struct gf_flock         lock;
         fd_t                *fd;
         void                *value;
+        void                *chksum_group_block;
         struct iobref       *iobref;
+        struct iovec        *iovec;
         gf_dirent_t          entries;
         dict_t              *xattr;
         uuid_t               ia_gfid;
+        
+        
 };
 
 typedef struct stripe_local   stripe_local_t;
