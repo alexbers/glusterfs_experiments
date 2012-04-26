@@ -35,6 +35,8 @@ enum gf_stripe_mem_types_ {
         gf_stripe_mt_stripe_private_t,
         gf_stripe_mt_stripe_options,
         gf_stripe_mt_xattr_sort_t,
+        gf_stripe_mt_saved_write_contex,
+        gf_stripe_mt_iobref,
         gf_stripe_mt_end
 };
 #endif

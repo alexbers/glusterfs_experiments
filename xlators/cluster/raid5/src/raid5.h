@@ -164,10 +164,14 @@ struct stripe_local {
         int32_t              full_block_start;
         int32_t              req_block_start;
         int32_t              req_block_end;
+        int32_t              block_num;
 
         int32_t              call_count;
         int32_t              wind_count; /* used instead of child_cound
                                             in case of read and write */
+        int32_t              group_count;
+        int32_t              call_count_in_group;   
+        
         int32_t              op_ret;
         int32_t              op_errno;
         int32_t              count;
@@ -191,23 +195,31 @@ struct stripe_local {
 
         /* General usage */
         off_t                offset;
+        size_t               size;
         off_t                stripe_size;
 
         int xattr_self_heal_needed;
         int entry_self_heal_needed;
 
         int8_t              *list;
-        struct gf_flock         lock;
+        struct gf_flock     lock;
         fd_t                *fd;
         void                *value;
-        void                *chksum_group_block;
         struct iobref       *iobref;
         struct iovec        *iovec;
         gf_dirent_t          entries;
         dict_t              *xattr;
         uuid_t               ia_gfid;
         
-        
+        void                *checksum_xor_with; // always has stripe_size
+};
+
+struct saved_write_contex {
+        fd_t                *fd;
+        struct iovec        *vector;
+        int32_t             count;
+        off_t               offset;
+        struct iobref       *iobref;
 };
 
 typedef struct stripe_local   stripe_local_t;

@@ -42,7 +42,6 @@
 
 #define ATTR_ROOT       0x0002
 
-
 struct volume_options options[];
 
 /*
@@ -80,6 +79,15 @@ int32_t get_phys_block_num(int32_t blocknum, int32_t totalblocks) {
 
 int32_t is_checksum_block(int32_t blocknum, int32_t totalblocks) {
         return blocknum==get_checksum_block_num(blocknum,totalblocks);
+}
+
+/*
+ * xors two arrays and put the result into third array
+ */
+void xor_data(char *dest, char *src_1, char *src_2, size_t size) {
+        size_t off = 0;
+        for(off=0; off<size; off++)
+                dest[off]=src_1[off] ^ src_2[off];
 }
 
 //void
@@ -556,8 +564,6 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
                 gf_log (this->name, GF_LOG_ERROR, "Cannot set real-"
                         "size key in xattr request dict");
 
-        //dict_foreach (xattr_req, bay_debug_dict, NULL);
-
         /* Everytime in stripe lookup, all child nodes
            should be looked up */
         local->call_count = priv->child_count;
@@ -573,6 +579,8 @@ err:
         STRIPE_STACK_UNWIND (lookup, frame, -1, op_errno, NULL, NULL, NULL, NULL);
         return 0;
 }
+
+
 
 
 int32_t
@@ -612,8 +620,6 @@ stripe_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         }
 
                         local->stbuf_blocks += buf->ia_blocks;
-                        if (local->stbuf_size < buf->ia_size)
-                                local->stbuf_size = buf->ia_size;
                 }
         }
         UNLOCK (&frame->lock);
@@ -623,7 +629,7 @@ stripe_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->op_ret = -1;
 
                 if (local->op_ret != -1) {
-                        local->stbuf.ia_size   = local->stbuf_size;
+                        local->stbuf.ia_size   = local->size;
                         local->stbuf.ia_blocks = local->stbuf_blocks;
                 }
 
@@ -635,27 +641,32 @@ out:
 }
 
 int32_t
-stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc)
+stripe_stat_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                   int32_t op_ret, int32_t lookup_op_errno, inode_t *inode,
+                   struct iatt *buf, dict_t *dict, struct iatt *postparent)
 {
         xlator_list_t    *trav = NULL;
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
-        int32_t           op_errno = EINVAL;
+        int32_t           stat_op_errno = EINVAL;
 
+        size_t            lookuped_size = 0; ;
+        loc_t *           loc = cookie;
+        
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
+        VALIDATE_OR_GOTO (buf, err);
 
+        lookuped_size = buf->ia_size;
+        
         priv = this->private;
         trav = this->children;
-
-        gf_log (this->name, GF_LOG_WARNING, "BAY: stat" );
-
         
         if (priv->first_child_down) {
-                op_errno = ENOTCONN;
+                stat_op_errno = ENOTCONN;
                 goto err;
         }
 
@@ -663,19 +674,43 @@ stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc)
         local = GF_CALLOC (1, sizeof (stripe_local_t),
                            gf_stripe_mt_stripe_local_t);
         if (!local) {
-                op_errno = ENOMEM;
+                stat_op_errno = ENOMEM;
                 goto err;
         }
         local->op_ret = -1;
         frame->local = local;
         local->call_count = priv->child_count;
-
+        local->size = lookuped_size;
+        
         while (trav) {
                 STACK_WIND (frame, stripe_stat_cbk, trav->xlator,
                             trav->xlator->fops->stat, loc);
                 trav = trav->next;
         }
 
+        return 0;
+
+err:
+        STRIPE_STACK_UNWIND (stat, frame, -1, stat_op_errno, NULL);
+        return 0;
+}
+
+
+int32_t
+stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc)
+{
+        int32_t           op_errno = EINVAL;
+        
+        VALIDATE_OR_GOTO (frame, err);
+        VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (loc, err);
+        VALIDATE_OR_GOTO (loc->path, err);
+        VALIDATE_OR_GOTO (loc->inode, err);
+
+        gf_log (this->name, GF_LOG_WARNING, "BAY: stat" );
+        
+        STACK_WIND_COOKIE (frame, stripe_stat_lookup_cbk,loc,this,
+                        this->fops->lookup, loc, NULL);   
         return 0;
 
 err:
@@ -2910,6 +2945,12 @@ stripe_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         /* files opened in O_APPEND mode does not allow lseek() on fd */
         flags &= ~O_APPEND;
+        
+        /* he mustn't open files in write-only mode*/
+        if (flags & O_WRONLY) {
+                flags &= ~O_WRONLY;
+                flags |= O_RDWR;
+        }
 
         local->fd = fd_ref (fd);
         frame->local = local;
@@ -3256,7 +3297,6 @@ err:
 }
 
 
-
 int32_t
 stripe_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
@@ -3402,8 +3442,6 @@ stripe_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 local->stbuf = *buf;
 
                         local->stbuf_blocks += buf->ia_blocks;
-                        if (local->stbuf_size < buf->ia_size)
-                                local->stbuf_size = buf->ia_size;
                 }
         }
         UNLOCK (&frame->lock);
@@ -3413,7 +3451,7 @@ stripe_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->op_ret = -1;
 
                 if (local->op_ret != -1) {
-                        local->stbuf.ia_size   = local->stbuf_size;
+                        local->stbuf.ia_size   = local->fctx->real_size;
                         local->stbuf.ia_blocks = local->stbuf_blocks;
                 }
 
@@ -3434,7 +3472,17 @@ stripe_fstat (call_frame_t *frame,
         stripe_private_t *priv = NULL;
         xlator_list_t    *trav = NULL;
         int32_t           op_errno = 1;
+        uint64_t          tmp_fctx = 0;
+        stripe_fd_ctx_t  *fctx = NULL;
 
+        fd_ctx_get (fd, this, &tmp_fctx);
+        if (!tmp_fctx) {
+                op_errno = EBADFD;
+                goto err;
+        }
+        fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
+
+        
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
         VALIDATE_OR_GOTO (fd, err);
@@ -3455,6 +3503,8 @@ stripe_fstat (call_frame_t *frame,
         }
         local->op_ret = -1;
         frame->local = local;
+        local->fctx = fctx;
+        
         local->call_count = priv->child_count;
 
         while (trav) {
@@ -3594,154 +3644,6 @@ err:
         return 0;
 }
 
-
-int32_t
-stripe_readv_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int32_t op_ret, int32_t op_errno, struct iatt *buf)
-{
-        int32_t         i = 0;
-        int32_t         callcnt = 0;
-        int32_t         count = 0;
-        stripe_local_t *local = NULL;
-        struct iovec   *vec = NULL;
-        struct iatt     tmp_stbuf = {0,};
-        struct iobref  *tmp_iobref = NULL;
-        struct iobuf   *iobuf = NULL;
-        stripe_fd_ctx_t  *fctx = NULL;
-
-        int32_t         full_block_start = 0;
-        int32_t         req_block_start = 0;
-        int32_t         req_block_end = 0;
-        
-        int32_t         curr_block = 0;
-        
-        gf_log (this->name, GF_LOG_WARNING,
-                "BAY: stripe_readv_fstat_cbk");
-        
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
-        local = frame->local;
-       
-        fctx = local->fctx;
-        
-        full_block_start=local->full_block_start;
-        req_block_start=local->req_block_start;
-        req_block_end=local->req_block_end;        
-
-        gf_log (this->name, GF_LOG_WARNING,
-                "BAY: stripe_readv_fstat_cbk %d %d %d", full_block_start,req_block_start,req_block_end);
-        
-        LOCK (&frame->lock);
-        {
-                callcnt = --local->call_count;
-                //if (op_ret != -1)
-                //        if (local->stbuf_size < buf->ia_size)
-                //                local->stbuf_size = buf->ia_size;
-        }
-        UNLOCK (&frame->lock);
-
-        local->stbuf_size = fctx->real_size;
-        
-        //gf_log (this->name, GF_LOG_WARNING,
-        //        "BAY: unlock: %d",callcnt);
-        if (!callcnt) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "BAY: callcnt!!");
-                
-                
-                op_ret = 0;
-
-                /* Keep extra space for filling in '\0's */
-                vec = GF_CALLOC ((local->count * 2), sizeof (struct iovec),
-                                 gf_stripe_mt_iovec);
-                if (!vec) {
-                        op_ret = -1;
-                        goto done;
-                }
-
-                for (i = 0; i < local->wind_count; i++) {
-                        curr_block=i+full_block_start;
-                        
-                        if(curr_block<req_block_start || curr_block>req_block_end) {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: skipping %d, start=%d, end=%d", curr_block,req_block_start,req_block_end);
-                        } else if(is_checksum_block(curr_block,fctx->stripe_count)) {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: skipping %d, as checksum block", curr_block);                    
-                        } else {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: i %d, %d", curr_block,local->replies[i].op_ret);                    
-                                
-                                if (local->replies[i].op_ret) {
-                                        gf_log (this->name, GF_LOG_WARNING,
-                                                "BAY: test1 %d %d %d",local->offset,local->replies[i].op_ret,local->replies[i].vector->iov_len);
-                                        //if()
-                                        //local->replies[i].vector->iov_len=1;
-                                        memcpy ((vec + count), local->replies[i].vector,
-                                                (local->replies[i].count * sizeof (struct iovec)));
-                                        count +=  local->replies[i].count;
-                                        op_ret += local->replies[i].op_ret;
-                                        
-                                        
-                                }
-                                if ((local->replies[i].op_ret <
-                                local->replies[i].requested_size) &&
-                                (local->stbuf_size > (curr_block*fctx->stripe_size + op_ret))) {
-                                        gf_log (this->name, GF_LOG_WARNING,
-                                                "BAY: test2", curr_block,local->replies[i].op_ret);                    
-
-                                        /* Fill in 0s here */
-                                        vec[count].iov_len  =
-                                                (local->replies[i].requested_size -
-                                                local->replies[i].op_ret);
-                                        iobuf = iobuf_get (this->ctx->iobuf_pool);
-                                        if (!iobuf) {
-                                                gf_log (this->name, GF_LOG_ERROR,
-                                                        "Out of memory.");
-                                                op_ret = -1;
-                                                op_errno = ENOMEM;
-                                                goto done;
-                                        }
-                                        memset (iobuf->ptr, 0, vec[count].iov_len);
-                                        iobref_add (local->iobref, iobuf);
-                                        vec[count].iov_base = iobuf->ptr;
-
-                                        op_ret += vec[count].iov_len;
-                                        count++;
-                                }
-                        }
-                        GF_FREE (local->replies[i].vector);
-                }
-
-                /* FIXME: notice that st_ino, and st_dev (gen) will be
-                 * different than what inode will have. Make sure this doesn't
-                 * cause any bugs at higher levels */
-                memcpy (&tmp_stbuf, &local->replies[0].stbuf,
-                        sizeof (struct iatt));
-                tmp_stbuf.ia_size = local->stbuf_size;
-
-        done:
-                GF_FREE (local->replies);
-                tmp_iobref = local->iobref;
-
-                gf_log (this->name, GF_LOG_WARNING,
-                        "BAY: stripe_readv_cbk: DONE from check_size, returning %d, op_errno=%d op_ret=%d vec_len=%d", 
-                        count,op_errno,op_ret, local->replies[0].vector->iov_len);
-
-                STRIPE_STACK_UNWIND (readv, frame, op_ret, op_errno, vec,
-                                     count, &tmp_stbuf, tmp_iobref);
-
-                iobref_unref (tmp_iobref);
-                if (vec)
-                        GF_FREE (vec);
-        }
-out:
-        return 0;
-}
-
 /**
  * stripe_readv_cbk - get all the striped reads, and order it properly, send it
  *        to above layer after putting it in a single vector.
@@ -3759,11 +3661,10 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t         req_block_start = 0;
         int32_t         req_block_end = 0;
         
-        int32_t         curr_block = 0;
-        
         call_frame_t   *mframe = NULL;
         stripe_local_t *mlocal = NULL;
         stripe_local_t *local = NULL;
+        struct iobuf   *iobuf = NULL;
         struct iovec   *final_vec = NULL;
         struct iatt     tmp_stbuf = {0,};
         struct iatt    *tmp_stbuf_p = NULL; //need it for a warning
@@ -3786,7 +3687,6 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (!mlocal)
                 goto out;
 
-
         full_block_start=mlocal->full_block_start;
         req_block_start=mlocal->req_block_start;
         req_block_end=mlocal->req_block_end;
@@ -3794,7 +3694,6 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         gf_log (this->name, GF_LOG_WARNING,
         "BAY: readv stripe_readv_cbk: index %d full_beg=%d, beg=%d end=%d", 
         index,full_block_start,req_block_start, req_block_end);
-        
         
         fctx = mlocal->fctx;
 
@@ -3834,6 +3733,12 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                            properly */
                         if (mlocal->replies[index].op_ret <
                             mlocal->replies[index].requested_size) {
+                                gf_log (this->name, GF_LOG_WARNING,
+                                        "BAY: index=%d %d < %d",
+                                        index, mlocal->replies[index].op_ret,
+                                        mlocal->replies[index].requested_size
+                                       );
+         
                                 need_to_check_proper_size = 1;
                         }
 
@@ -3858,28 +3763,29 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 if (!final_vec) {
                         op_ret = -1;
+                        op_errno = ENOMEM;
                         goto done;
                 }
 
                 // getting an indexes to answer
                 for (index = 0; index < mlocal->wind_count; index++) {
-                        curr_block=index+full_block_start;
+                        //curr_block=index+req_block_start;
                         //gf_log (this->name, GF_LOG_WARNING,
                         //        "BAY: debug %d %d", curr_block,get_checksum_block_num(curr_block,fctx->stripe_count));                    
                         
-                        if(curr_block<req_block_start || curr_block>req_block_end) {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: skipping %d, start=%d, end=%d", curr_block,req_block_start,req_block_end);
-                        } else if(is_checksum_block(curr_block,fctx->stripe_count)) {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: skipping %d, as checksum block", curr_block);                    
-                        } else {
+                        //if(curr_block<req_block_start || curr_block>req_block_end) {
+                        //        gf_log (this->name, GF_LOG_WARNING,
+                        //               "BAY: skipping %d, start=%d, end=%d", curr_block,req_block_start,req_block_end);
+                        //} else if(is_checksum_block(curr_block,fctx->stripe_count)) {
+                        //        gf_log (this->name, GF_LOG_WARNING,
+                        //                "BAY: skipping %d, as checksum block", curr_block);                    
+                        //} else {
                                 memcpy ((final_vec + final_count),
                                         mlocal->replies[index].vector,
                                         (mlocal->replies[index].count *
                                         sizeof (struct iovec)));
                                 final_count +=  mlocal->replies[index].count;
-                        }
+                        //}
                         GF_FREE (mlocal->replies[index].vector);
                 }
 
@@ -3891,102 +3797,79 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 tmp_stbuf.ia_size = local->stbuf_size;
                 tmp_stbuf.ia_blocks = local->stbuf_blocks;
 
-        done:
-                /* */
-                GF_FREE (mlocal->replies);
-                tmp_iobref = mlocal->iobref;
-                /* work around for nfs truncated read. Bug 3774 */
-                tmp_stbuf_p = &tmp_stbuf;
-                WIPE (tmp_stbuf_p);
-                gf_log (this->name, GF_LOG_WARNING,
-                        "BAY: stripe_readv_cbk: DONE, returning %d, op_errno=%d op_ret=%d", 
-                        final_count,op_errno,op_ret);
-
-                STRIPE_STACK_UNWIND (readv, mframe, op_ret, op_errno, final_vec,
-                                     final_count, &tmp_stbuf, tmp_iobref);
-
-                iobref_unref (tmp_iobref);
-                if (final_vec)
-                        GF_FREE (final_vec);
-        }
-
-        goto out;
+                goto done;
 
 check_size:
-        mlocal->call_count = fctx->stripe_count;
-
-        int32_t         i = 0;
-        final_vec = GF_CALLOC (mlocal->count * 2, sizeof (struct iovec),
-                                gf_stripe_mt_iovec);
-
-        if (!final_vec) {
-                op_ret = -1;
-                goto done;
-        }
+        op_ret = 0;
 
         final_count = 0;
-        struct iobuf   *iobuf = NULL;
+        final_vec = GF_CALLOC (mlocal->count * 2, sizeof (struct iovec),
+                                gf_stripe_mt_iovec);
+        if (!final_vec) {
+                op_ret = -1;
+                op_errno = ENOMEM;
+                goto done;
+        }
 
         gf_log (this->name, GF_LOG_WARNING,
                 "BAY: stripe_readv_fstat_cbk %d %d %d", full_block_start,req_block_start,req_block_end);
         
         mlocal->stbuf_size = fctx->real_size;
         
-        op_ret = 0;
 
-        for (i = 0; i < mlocal->wind_count; i++) {
-                curr_block=i+full_block_start;
+        for (index = 0; index < mlocal->wind_count; index++) {
+                //curr_block=index+req_block_start;
 
-                if(curr_block<req_block_start || curr_block>req_block_end) {
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "BAY: skipping %d, start=%d, end=%d", curr_block,req_block_start,req_block_end);
-                } else if(is_checksum_block(curr_block,fctx->stripe_count)) {
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "BAY: skipping %d, as checksum block", curr_block);                    
-                } else {
-                        gf_log (this->name, GF_LOG_WARNING,
-                                "BAY: i %d, %d", curr_block,mlocal->replies[i].op_ret);                    
+                //if(curr_block<req_block_start || curr_block>req_block_end) {
+                //        gf_log (this->name, GF_LOG_WARNING,
+                //                "BAY: skipping %d, start=%d, end=%d", curr_block,req_block_start,req_block_end);
+                //} else if(is_checksum_block(curr_block,fctx->stripe_count)) {
+                //        gf_log (this->name, GF_LOG_WARNING,
+                //                "BAY: skipping %d, as checksum block", curr_block);                    
+                //} else {
+                        //gf_log (this->name, GF_LOG_WARNING,
+                        //        "BAY: i %d, %d", curr_block,mlocal->replies[index].op_ret);                    
                         
-                        if (mlocal->replies[i].op_ret) {
+                        if (mlocal->replies[index].op_ret) {
                                 gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: test1 %d %d %d %x %d",
+                                        "BAY: test1 %d %d %d %d",
                                         mlocal->offset,
-                                        mlocal->replies[i].op_ret,
-                                        mlocal->replies[i].vector->iov_len,
-                                        final_vec, final_count
+                                        mlocal->replies[index].op_ret,
+                                        mlocal->replies[index].vector->iov_len,
+                                        final_count
                                        );
-                                memcpy ((final_vec + final_count), mlocal->replies[i].vector,
-                                        (mlocal->replies[i].count * sizeof (struct iovec)));
-                                final_count +=  mlocal->replies[i].count;
-                                op_ret += mlocal->replies[i].op_ret;
+                                memcpy ((final_vec + final_count), mlocal->replies[index].vector,
+                                        (mlocal->replies[index].count * sizeof (struct iovec)));
+                                final_count +=  mlocal->replies[index].count;
+                                op_ret += mlocal->replies[index].op_ret;
                         }
-                        if ((mlocal->replies[i].op_ret <
-                        mlocal->replies[i].requested_size) &&
-                        (mlocal->stbuf_size > (curr_block*fctx->stripe_size + op_ret))) {
-                                gf_log (this->name, GF_LOG_WARNING,
-                                        "BAY: test2", curr_block,mlocal->replies[i].op_ret);                    
+                        //if ((mlocal->replies[index].op_ret <
+                        //mlocal->replies[index].requested_size) &&
+                        //(mlocal->stbuf_size > (curr_block*fctx->stripe_size + op_ret))) {
+                        //        gf_log (this->name, GF_LOG_WARNING,
+                        //                "BAY: test2", curr_block,mlocal->replies[index].op_ret);                    
 
                                 /* Fill in 0s here */
-                                final_vec[final_count].iov_len  =
-                                        (mlocal->replies[i].requested_size -
-                                        mlocal->replies[i].op_ret);
-                                iobuf = iobuf_get (this->ctx->iobuf_pool);
-                                if (!iobuf) {
-                                        gf_log (this->name, GF_LOG_ERROR,
-                                                "Out of memory.");
-                                        op_ret = -1;
-                                        op_errno = ENOMEM;
-                                        goto done;
-                                }
-                                memset (iobuf->ptr, 0, final_vec[final_count].iov_len);
-                                iobref_add (mlocal->iobref, iobuf);
-                                final_vec[final_count].iov_base = iobuf->ptr;
-
-                                op_ret += final_vec[final_count].iov_len;
-                                final_count++;
-                        }
-                }
-                GF_FREE (mlocal->replies[i].vector);
+                        //        final_vec[final_count].iov_len  =
+                        //                (mlocal->replies[index].requested_size -
+                        //                mlocal->replies[index].op_ret);
+                        //        iobuf = iobuf_get (this->ctx->iobuf_pool);
+                        //        if (!iobuf) {
+                        //                gf_log (this->name, GF_LOG_ERROR,
+                        //                        "Out of memory.");
+                        //                op_ret = -1;
+                        //                op_errno = ENOMEM;
+                        //                goto done;
+                        //        }
+                        //        memset (iobuf->ptr, 0, final_vec[final_count].iov_len);
+                        //        iobref_add (mlocal->iobref, iobuf);
+                        //        final_vec[final_count].iov_base = iobuf->ptr;
+                        //
+                        //        op_ret += final_vec[final_count].iov_len;
+                        //        final_count++;
+                        //}
+                //}
+                GF_FREE (mlocal->replies[index].vector);
         }
 
         /* FIXME: notice that st_ino, and st_dev (gen) will be
@@ -3996,13 +3879,33 @@ check_size:
                 sizeof (struct iatt));
         tmp_stbuf.ia_size = mlocal->stbuf_size;
 
-        goto done;
                 
-//                STACK_WIND (mframe, stripe_readv_fstat_cbk,
-//                            (fctx->xl_array[index]),
-//                            (fctx->xl_array[index])->fops->fstat,
-//                            mlocal->fd);
-        //}
+        goto done;
+
+done:
+                GF_FREE (mlocal->replies);
+                tmp_iobref = mlocal->iobref;
+                /* work around for nfs truncated read. Bug 3774 */
+                tmp_stbuf_p = &tmp_stbuf;
+                WIPE (tmp_stbuf_p);
+
+                int sum=0;
+                for(index = 0; index < final_count; index++) {
+                        sum += final_vec[index].iov_len;        
+                }
+                
+                gf_log (this->name, GF_LOG_WARNING,
+                        "BAY: stripe_readv_cbk: DONE, returning %d, op_errno=%d op_ret=%d sum=%d offset=%d size=%d", 
+                        final_count,op_errno,op_ret,sum, mlocal->offset, mlocal->readv_size);
+
+                STRIPE_STACK_UNWIND (readv, mframe, op_ret, op_errno, final_vec,
+                                     final_count, &tmp_stbuf, tmp_iobref);
+
+                iobref_unref (tmp_iobref);
+                if (final_vec)
+                        GF_FREE (final_vec);
+                goto out;
+        }
 
 out:
         STRIPE_STACK_DESTROY (frame);
@@ -4018,7 +3921,10 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         int32_t           op_errno = EINVAL;
         int32_t           idx = 0;
         int32_t           index = 0;
+        int32_t           wind_num = 0;
         int32_t           num_stripe = 0;
+        int32_t           remaining_size = 0;
+
         size_t            frame_size = 0;
         off_t             frame_offset = 0;
         uint64_t          tmp_fctx = 0;
@@ -4031,16 +3937,15 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         call_frame_t     *rframe = NULL;
         stripe_local_t   *rlocal = NULL;
         stripe_fd_ctx_t  *fctx = NULL;
-
-
-        gf_log (this->name, GF_LOG_WARNING,
-               "BAY: READV");
-        
+        stripe_private_t *priv = NULL;
         
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (this->private, err);
         VALIDATE_OR_GOTO (fd, err);
         VALIDATE_OR_GOTO (fd->inode, err);
+
+        priv = this->private;
 
         fd_ctx_get (fd, this, &tmp_fctx);
         if (!tmp_fctx) {
@@ -4051,7 +3956,7 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         stripe_size = fctx->stripe_size;
 
         gf_log (this->name, GF_LOG_WARNING,
-               "BAY: READV stripe_size: %d, size: %d, offset: %d realsize=%d", fctx->stripe_size, size, offset,fctx->real_size);
+               "BAY: READV stripe_size: %d, size: %d, offset: %d realsize=%d frame=%x", fctx->stripe_size, size, offset,fctx->real_size,frame);
 
         if (!stripe_size) {
                 gf_log (this->name, GF_LOG_DEBUG,
@@ -4065,10 +3970,8 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
          */
         req_block_start = get_phys_block_num(
                 offset/stripe_size,fctx->stripe_count);
-                //floor (offset, stripe_size) / stripe_size , fctx->stripe_count);
         req_block_end = get_phys_block_num(
                 (offset+size-1)/ stripe_size, fctx->stripe_count);
-//                roof (offset+size, stripe_size) / stripe_size, fctx->stripe_count);
         full_block_start=floor(req_block_start,fctx->stripe_count);
         full_block_end=req_block_end / fctx->stripe_count * fctx->stripe_count + fctx->stripe_count - 1;
         
@@ -4100,7 +4003,6 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         //off_index = get_phys_block_num(offset / stripe_size,fctx->stripe_count);
         //off_index = off_index % fctx->stripe_count;
         
-        local->wind_count = num_stripe;
         local->readv_size = size;
         local->offset     = offset;
         local->fd         = fd_ref (fd);
@@ -4110,52 +4012,105 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         local->req_block_start=req_block_start;
         local->req_block_end=req_block_end;
         
-        //int32_t ;
-        //gf_log (this->name, GF_LOG_WARNING, "BAY: 11111");
-        
-        //index is logical
-        for (index = full_block_start; index <= full_block_end; index++) {
-                rframe = copy_frame (frame);
-                rlocal = GF_CALLOC (1, sizeof (stripe_local_t),
-                                    gf_stripe_mt_stripe_local_t);
-                if (!rlocal) {
-                        op_errno = ENOMEM;
-                        goto err;
+        if (priv->nodes_down==0) {
+                // compute the wind count
+                local->wind_count = 0;
+                for (index = req_block_start; index <= req_block_end; index++) {
+                        if(is_checksum_block(index,fctx->stripe_count))
+                                continue;
+                        local->wind_count++;
                 }
                 
-                frame_offset = index*stripe_size;
-                frame_size = stripe_size;
-
-                if(index == req_block_end) {
-                        frame_size=size % stripe_size;
-                        if(frame_size==0) {
-                                frame_size=stripe_size;
+                remaining_size = size;
+                wind_num = 0;
+                
+                //index is logical
+                for (index = req_block_start; index <= req_block_end; index++) {
+                        if(is_checksum_block(index,fctx->stripe_count))
+                                continue;
+                        
+                        rframe = copy_frame (frame);
+                        rlocal = GF_CALLOC (1, sizeof (stripe_local_t),
+                                        gf_stripe_mt_stripe_local_t);
+                        if (!rlocal) {
+                                op_errno = ENOMEM;
+                                goto err;
                         }
+                        
+                        if(index == req_block_start)
+                                frame_offset = index*stripe_size + offset % stripe_size;
+                        else
+                                frame_offset = index*stripe_size;
+                        
+                        if(index == req_block_start)
+                                frame_size = stripe_size - offset % stripe_size;
+                        else
+                                frame_size = stripe_size;
+                        
+                        if(remaining_size<frame_size)
+                                frame_size = remaining_size;
+                                
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "BAY: readv index=%d req_block_end=%d frame_size=%d frame_offset=%d",
+                                index, req_block_end, frame_size, frame_offset);
+
+                        rframe->local = rlocal;
+                        rlocal->orig_frame = frame;
+                        rlocal->node_index = wind_num;
+                        rlocal->readv_size = frame_size;
+                        rlocal->block_num = index;
+                        idx = (index % fctx->stripe_count);
+                        
+                        STACK_WIND (rframe, stripe_readv_cbk, fctx->xl_array[idx],
+                                fctx->xl_array[idx]->fops->readv,
+                                fd, frame_size, frame_offset);
+
+                        remaining_size -= frame_size;
+                        wind_num += 1;
                 }
+        } else {
+                local->wind_count = num_stripe;
 
-                if(index == req_block_start) {
-                        frame_offset += offset%stripe_size;
-                        frame_size -= offset%stripe_size;
-                }
-                
-               // if(index+
-                //frame_size = min (roof (frame_offset+1, stripe_size),
-                //                  (offset + size)) - frame_offset;
+                //index is logical
+                for (index = full_block_start; index <= full_block_end; index++) {
+                        rframe = copy_frame (frame);
+                        rlocal = GF_CALLOC (1, sizeof (stripe_local_t),
+                                        gf_stripe_mt_stripe_local_t);
+                        if (!rlocal) {
+                                op_errno = ENOMEM;
+                                goto err;
+                        }
+                        
+                        frame_offset = index*stripe_size;
+                        frame_size = stripe_size;
 
-                gf_log (this->name, GF_LOG_WARNING,
-                        "BAY: readv index=%d req_block_end=%d frame_size=%d frame_offset=%d",
-                        index, req_block_end, frame_size, frame_offset);
+                        if(index == req_block_end) {
+                                frame_size=size % stripe_size;
+                                if(frame_size==0) {
+                                        frame_size=stripe_size;
+                                }
+                        }
 
-                rframe->local = rlocal;
-                rlocal->orig_frame = frame;
-                rlocal->node_index = index-full_block_start;
-                rlocal->readv_size = frame_size;
-                idx = (index % fctx->stripe_count);
-                
-                STACK_WIND (rframe, stripe_readv_cbk, fctx->xl_array[idx],
-                            fctx->xl_array[idx]->fops->readv,
-                            fd, frame_size, frame_offset);
+                        if(index == req_block_start) {
+                                frame_offset += offset%stripe_size;
+                                frame_size -= offset%stripe_size;
+                        }
+                        
 
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "BAY: readv index=%d req_block_end=%d frame_size=%d frame_offset=%d",
+                                index, req_block_end, frame_size, frame_offset);
+
+                        rframe->local = rlocal;
+                        rlocal->orig_frame = frame;
+                        rlocal->node_index = index-full_block_start;
+                        rlocal->readv_size = frame_size;
+                        idx = (index % fctx->stripe_count);
+                        
+                        STACK_WIND (rframe, stripe_readv_cbk, fctx->xl_array[idx],
+                                fctx->xl_array[idx]->fops->readv,
+                                fd, frame_size, frame_offset);
+                }                
         }
 
         return 0;
@@ -4328,23 +4283,10 @@ out:
 
 int32_t
 stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                  int32_t op_ret, int32_t op_errno, struct iovec *vector,
-                  int32_t count, struct iatt *stbuf, struct iobref *iobref)
-{
-        
-}
-
-int32_t
-stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
-               struct iovec *vector, int32_t count, off_t offset,
-               struct iobref *iobref)
+                  int32_t read_op_ret, int32_t read_op_errno, struct iovec *read_vector,
+                  int32_t read_count, struct iatt *read_stbuf, struct iobref *read_iobref)
 {
         stripe_local_t   *local = NULL;
-        stripe_fd_ctx_t  *fctx = NULL;
-        int32_t           op_errno = 1;
-        int32_t           idx = 0;
-        int32_t           total_size = 0;
-        int32_t           offset_offset = 0;
 
         off_t             req_block_start = 0;
         off_t             req_block_end = 0;
@@ -4353,18 +4295,10 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         off_t             begin_group_block = 0;
         off_t             curr_block = 0;
-
-        int32_t           num_stripe = 0;
+   
+        int32_t           offset_offset = 0;
         
-        int32_t           remaining_size = 0;
-        off_t             fill_size = 0;
-        uint64_t          stripe_size = 0;
-        uint64_t          tmp_fctx = 0;
-        int               i = 0;
-
-        int32_t           tmp_count = count;
-        struct iovec     *tmp_vec = NULL;
-        
+        off_t             block_offset = 0;
         
         call_frame_t     *rframe = NULL; // A frame for groups of operations
         stripe_local_t   *rlocal = NULL;
@@ -4372,61 +4306,129 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
         call_frame_t     *rrframe = NULL; // A frame for one operation
         stripe_local_t   *rrlocal = NULL;
         
+        // data from write contex
+        fd_t             *write_fd = NULL;
+        struct iovec     *write_vector = NULL;
+        int32_t           write_count = 0;
+        off_t             write_offset;
+        struct iobref    *write_iobref;
+        
+        off_t             fill_size = 0;
+        uint64_t          tmp_fctx = 0;
+        
+        uint64_t          stripe_size = 0;
+
+        int32_t           num_stripe = 0;
+        
+        int32_t           remaining_size = 0;
+        int               i = 0;
+
+        int32_t           idx = 0;
+        off_t             off = 0;
+                
+        int32_t           tmp_count = 0;
+        struct iovec     *tmp_vec = NULL;
+                
+        stripe_fd_ctx_t  *fctx = NULL;
+        struct saved_write_contex *wc = NULL;
+        
+        int32_t           write_op_ret = -1;
+        int32_t           write_op_errno = EINVAL;
+
+        char              *old_data = NULL;
+        char              *new_data = NULL;
+        int32_t           data_size = 0;
+        
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        VALIDATE_OR_GOTO (cookie, err);
 
-        fd_ctx_get (fd, this, &tmp_fctx);
+        //if(read_op_ret ==  -1) {
+        //        write_op_errno = read_op_errno;
+        //        goto err;
+        //}
+        
+        // restoring context
+        wc = cookie;
+        write_fd = wc->fd;
+        write_vector = wc->vector;
+        write_count = wc->count;
+        write_offset = wc->offset;
+        write_iobref = wc->iobref;
+
+        for (idx = 0; idx< write_count; idx ++)
+                data_size += write_vector[idx].iov_len;
+        
+        old_data = GF_CALLOC (data_size, sizeof(char),gf_stripe_mt_char);
+        new_data = GF_CALLOC (data_size, sizeof(char),gf_stripe_mt_char);
+        if ( !old_data || !new_data ) {
+                write_op_errno = ENOMEM;
+                goto err;                
+        }
+        
+        off = 0;
+        for (idx = 0; idx < read_count; idx++) {
+                memcpy(old_data + off, read_vector[idx].iov_base,read_vector[idx].iov_len);
+                off+=read_vector[idx].iov_len;
+        }
+
+        off = 0;
+        for (idx = 0; idx < write_count; idx++) {
+                memcpy(new_data + off, write_vector[idx].iov_base,write_vector[idx].iov_len);
+                off+=write_vector[idx].iov_len;
+        }
+
+        tmp_count = write_count;
+        
+        gf_log (this->name, GF_LOG_WARNING,
+                "BAY: stripe_writev_readv_cbk read_op_ret=%d read_op_errno=%d",
+                read_op_ret, read_op_errno);
+        
+        fd_ctx_get (write_fd, this, &tmp_fctx);
         if (!tmp_fctx) {
-                op_errno = EINVAL;
+                write_op_errno = EINVAL;
                 goto err;
         }
         fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
         stripe_size = fctx->stripe_size;
 
-        for (idx = 0; idx< count; idx ++) {
-                total_size += vector[idx].iov_len;
-        }
-        
-        
         req_block_start = get_phys_block_num(
-                offset/stripe_size,fctx->stripe_count);
+                write_offset/stripe_size,fctx->stripe_count);
         req_block_end = get_phys_block_num(
-                (offset+total_size-1)/ stripe_size, fctx->stripe_count);
+                (write_offset+data_size-1)/ stripe_size, fctx->stripe_count);
         full_block_start=floor(req_block_start,fctx->stripe_count);
         full_block_end=req_block_end / fctx->stripe_count * fctx->stripe_count + fctx->stripe_count - 1;
         
         num_stripe = full_block_end - full_block_start + 1;
-        
-        
+                
         /* File has to be stripped across the child nodes */
-        remaining_size = total_size;
+        remaining_size = data_size;
 
         local = GF_CALLOC (1, sizeof (stripe_local_t),
                            gf_stripe_mt_stripe_local_t);
         if (!local) {
-                op_errno = ENOMEM;
+                write_op_errno = ENOMEM;
                 goto err;
         }
         frame->local = local;
         local->stripe_size = stripe_size;
-        local->fd = fd_ref (fd);
+        local->fd = fd_ref (write_fd);
         local->fctx = fctx;
-        local->offset = offset;
-        local->chksum_group_block = NULL;
-        
+        local->size = data_size;
+        local->offset = write_offset;
+        local->group_count=num_stripe / fctx->stripe_count;
+
         gf_log (this->name, GF_LOG_WARNING,
                 "BAY: writev req_block_start=%d req_block_end=%d full_block_start=%d full_block_end=%d",
                 req_block_start, req_block_end, full_block_start, full_block_end);
-        
+
         if( (full_block_end+1) % fctx->stripe_count != 0) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "BAY: writev: full_block_end=%d. This is very wrong.",
                         full_block_end);                
         }
-        
-        // we divide the big writing task into smaller tasks, which affects only
+
+        // we divide the big writing task into smaller tasks, which affect only
         // one checksum block
         for(begin_group_block=full_block_start; 
             begin_group_block!=full_block_end+1; 
@@ -4436,62 +4438,72 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 rlocal = GF_CALLOC (1, sizeof (stripe_local_t),
                                     gf_stripe_mt_stripe_local_t);
                 if (!rlocal) {
-                        op_errno = ENOMEM;
+                        write_op_errno = ENOMEM;
                         goto err;
                 }
                 
                 rframe->local = rlocal;
                 rlocal->orig_frame = frame;
                 
-                //rlocal->chksum_group_block = GF_CALLOC(stripe_size, sizeof (char),
-                //                                       gf_stripe_mt_char);
-                //if (!rlocal->chksum_group_block) {
-                //        op_errno = ENOMEM;
-                //        goto err;                        
-                //}
+                rlocal->checksum_xor_with = GF_CALLOC(stripe_size, sizeof (char),
+                                                      gf_stripe_mt_char);
+                if (!rlocal->checksum_xor_with) {
+                        write_op_errno = ENOMEM;
+                        goto err;                      
+                }
                 
-                //memset(rlocal->chksum_group_block,0,stripe_size);
+                memset(rlocal->checksum_xor_with,0,stripe_size); 
+                
+                // calculate a num of calls in current block
+                rlocal->call_count_in_group = 0;
+                for(curr_block=begin_group_block;
+                    curr_block<begin_group_block+fctx->stripe_count;
+                    curr_block++) {
+                        if(curr_block<req_block_start || curr_block>req_block_end)
+                                continue;   
+                        if(is_checksum_block(curr_block,fctx->stripe_count)) 
+                                continue;
+                        
+                        rlocal->call_count_in_group++;    
+                }
                 
                 for(curr_block=begin_group_block;
                     curr_block<begin_group_block+fctx->stripe_count;
                     curr_block++) {
-                        if(curr_block<req_block_start || curr_block>req_block_end) {
+                        if(curr_block<req_block_start || curr_block>req_block_end)
+                                continue;   
+                        if(is_checksum_block(curr_block,fctx->stripe_count)) 
                                 continue;
-                        }
-                        if(is_checksum_block(curr_block,fctx->stripe_count)) {
-                                continue;
-                        }
 
                         rrframe = copy_frame (rframe);
                         rrlocal = GF_CALLOC (1, sizeof (stripe_local_t),
                                         gf_stripe_mt_stripe_local_t);
                         if (!rrlocal) {
-                                op_errno = ENOMEM;
+                                write_op_errno = ENOMEM;
                                 goto err;
                         }
                         
                         rrframe->local = rrlocal;
                         rrlocal->orig_frame = rframe;
                         
-                        idx = (curr_block % fctx->stripe_count);
+                        idx = curr_block % fctx->stripe_count;
                         
                         // fill the beginning and end of each read/write task
                         fill_size = local->stripe_size -
-                             (offset + offset_offset) % local->stripe_size;
+                             (write_offset + offset_offset) % local->stripe_size;
                         if (fill_size > remaining_size)
                                 fill_size = remaining_size;
                         remaining_size -= fill_size;
                         
-                        
-                        tmp_count = iov_subset (vector, count, offset_offset,
+                        tmp_count = iov_subset (write_vector, write_count, offset_offset,
                                         offset_offset + fill_size, NULL);
                         tmp_vec = GF_CALLOC (tmp_count, sizeof (struct iovec),
                                         gf_stripe_mt_iovec);
                         if (!tmp_vec) {
-                                op_errno = ENOMEM;
+                                write_op_errno = ENOMEM;
                                 goto err;
                         }
-                        tmp_count = iov_subset (vector, count, offset_offset,
+                        tmp_count = iov_subset (write_vector, write_count, offset_offset,
                                                 offset_offset + fill_size, tmp_vec);
 
                         rrlocal->count = tmp_count;
@@ -4501,38 +4513,30 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                         if (remaining_size == 0)
                                 local->unwind = 1;
                         
+                        block_offset = (write_offset + offset_offset) % local->stripe_size;
+                        
+                        xor_data(rlocal->checksum_xor_with + block_offset,
+                                 old_data + offset_offset,
+                                 new_data + offset_offset,
+                                 fill_size);
+                        
                         gf_log (this->name, GF_LOG_WARNING,
                                 "BAY: writev winding for block %d, orig_offset=%d, new_offset=%d", 
-                                curr_block,offset + offset_offset,
-                                local->stripe_size * curr_block + (offset + offset_offset) % local->stripe_size);
+                                curr_block,write_offset + offset_offset,
+                                local->stripe_size * curr_block + block_offset);
                         
                         STACK_WIND (rrframe, stripe_writev_cbk, fctx->xl_array[idx],
-                            fctx->xl_array[idx]->fops->writev, fd, tmp_vec,
+                            fctx->xl_array[idx]->fops->writev, write_fd, tmp_vec,
                             tmp_count, 
-                            local->stripe_size * curr_block + 
-                            (offset + offset_offset) % local->stripe_size, 
-                            iobref);
+                            local->stripe_size * curr_block + block_offset, 
+                            write_iobref);
+                        GF_FREE (tmp_vec);
                         
                         offset_offset += fill_size;
                         if (remaining_size == 0)
                                 break;
-                        //GF_FREE (tmp_vec);
-
-                        
                 }
-                
-                
-                
-                
-                
-                //frame_offset = index*stripe_size;
-                //frame_size = stripe_size;
-                //if(index == req_block_end) {
-                //        frame_size=size % stripe_size;
-                //        if(frame_size==0) {
-                //                frame_size=stripe_size;
-                //        }
-                //}
+                                
 
                 //gf_log (this->name, GF_LOG_WARNING,
                 //        "BAY: readv index=%d req_block_end=%d frame_size=%d frame_offset=%d",
@@ -4547,7 +4551,7 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         }
         
-        
+        goto mem_clean;
         //STRIPE_STACK_UNWIND (writev, frame, -1, op_errno, NULL, NULL);
         //gf_log (this->name, GF_LOG_WARNING,
         //        "BAY: writev after unwind req_block_start=%d req_block_end=%d full_block_start=%d full_block_end=%d",
@@ -4588,8 +4592,76 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                 if (remaining_size == 0)
                         break;
         }*/
-                
+        
+
+err:
+        STRIPE_STACK_UNWIND (writev, frame, -1, 
+                             write_op_errno, NULL, NULL);
+mem_clean:
+        
+        if(old_data)
+                GF_FREE (old_data);
+        if(new_data)
+                GF_FREE (new_data);
+        
         return 0;
+}
+
+int32_t
+stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
+               struct iovec *vector, int32_t count, off_t offset,
+               struct iobref *iobref)
+{
+        struct iobref *iobref_copy = NULL;
+        
+        int32_t           i = 0;
+        int32_t           total_size = 0;
+        int32_t           op_errno = 1;
+        
+        struct saved_write_contex *wc = NULL; // we have to save write contex
+        
+        VALIDATE_OR_GOTO (frame, err);
+        VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (fd, err);
+        VALIDATE_OR_GOTO (fd->inode, err);
+
+        gf_log (this->name, GF_LOG_WARNING,
+        "BAY: WRITEV");
+
+        // We can't pass data from stack because the stack might be destroyed 
+        // by the callback call, so copy it
+        iobref_copy = GF_CALLOC(1, sizeof (struct iobref),
+                       gf_stripe_mt_iobref);
+
+        if(!iobref_copy) {
+                op_errno = ENOMEM;
+                goto err;                
+        }
+        memcpy (iobref_copy, iobref, sizeof (struct iobref));
+        
+        /* Saving write contex */
+        wc = GF_CALLOC(1, sizeof (struct saved_write_contex),
+                       gf_stripe_mt_saved_write_contex);
+        if(!wc) {
+                op_errno = ENOMEM;
+                goto err;                
+        }
+        
+        wc->fd=fd;
+        wc->vector=vector;
+        wc->count=count;
+        wc->offset=offset;
+        wc->iobref=iobref_copy;
+        
+        // Calculating size of fs query
+        for (i = 0; i< count; i ++)
+                total_size += vector[i].iov_len;
+        
+        
+        STACK_WIND_COOKIE (frame, stripe_writev_readv_cbk, wc, this,
+                this->fops->readv, fd, total_size, offset);
+        return 0;
+                      
 err:
         STRIPE_STACK_UNWIND (writev, frame, -1, op_errno, NULL, NULL);
         return 0;
