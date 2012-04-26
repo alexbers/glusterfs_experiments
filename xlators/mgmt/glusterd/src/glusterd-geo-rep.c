@@ -31,11 +31,12 @@
 #include "glusterd-utils.h"
 #include "glusterd-volgen.h"
 #include "run.h"
+#include "syscall.h"
 
 #include <signal.h>
 
 static char *gsync_reserved_opts[] = {
-        "gluster-command",
+        "gluster-command-dir",
         "pid-file",
         "state-file",
         "session-owner",
@@ -529,7 +530,8 @@ gsync_status (char *master, char *slave, int *status)
 
         *status = gsync_status_byfd (fd);
 
-        close (fd);
+        sys_close (fd);
+
         return 0;
 }
 
@@ -804,7 +806,7 @@ glusterd_store_slave_in_info (glusterd_volinfo_t *volinfo, char *slave,
                  * assert an uuid mismatch
                  */
                 t = strtail (slaveentry, host_uuid);
-                GF_ASSERT (!t || *t != ':')
+                GF_ASSERT (!t || *t != ':');
 
                 gf_log ("", GF_LOG_ERROR, GEOREP" has already been invoked for "
                                           "the %s (master) and %s (slave) "
@@ -987,7 +989,7 @@ glusterd_verify_gsync_status_opts (dict_t *dict, char **op_errstr)
 }
 
 
-static int
+int
 glusterd_op_gsync_args_get (dict_t *dict, char **op_errstr,
                             char **master, char **slave)
 {
@@ -995,21 +997,23 @@ glusterd_op_gsync_args_get (dict_t *dict, char **op_errstr,
         int             ret = -1;
         GF_ASSERT (dict);
         GF_ASSERT (op_errstr);
-        GF_ASSERT (master);
-        GF_ASSERT (slave);
 
-        ret = dict_get_str (dict, "master", master);
-        if (ret < 0) {
-                gf_log ("", GF_LOG_WARNING, "master not found");
-                *op_errstr = gf_strdup ("master not found");
-                goto out;
+        if (master) {
+                ret = dict_get_str (dict, "master", master);
+                if (ret < 0) {
+                        gf_log ("", GF_LOG_WARNING, "master not found");
+                        *op_errstr = gf_strdup ("master not found");
+                        goto out;
+                }
         }
 
-        ret = dict_get_str (dict, "slave", slave);
-        if (ret < 0) {
-                gf_log ("", GF_LOG_WARNING, "slave not found");
-                *op_errstr = gf_strdup ("slave not found");
-                goto out;
+        if (slave) {
+                ret = dict_get_str (dict, "slave", slave);
+                if (ret < 0) {
+                        gf_log ("", GF_LOG_WARNING, "slave not found");
+                        *op_errstr = gf_strdup ("slave not found");
+                        goto out;
+                }
         }
 
 
@@ -1132,6 +1136,9 @@ stop_gsync (char *master, char *slave, char **msg)
                 goto out;
         }
 
+        if (pfd < 0)
+                goto out;
+
         ret = read (pfd, buf, 1024);
         if (ret > 0) {
                 pid = strtol (buf, NULL, 10);
@@ -1158,7 +1165,7 @@ stop_gsync (char *master, char *slave, char **msg)
         ret = 0;
 
 out:
-        close (pfd);
+        sys_close (pfd);
         return ret;
 }
 
@@ -1649,7 +1656,6 @@ glusterd_get_pid_from_file (char *master, char *slave, pid_t *pid)
         char buff[1024]        = {0,};
 
         pfd = gsyncd_getpidfile (master, slave, pidfile);
-
         if (pfd == -2) {
                 gf_log ("", GF_LOG_ERROR, GEOREP" log-rotate validation "
                         " failed for %s & %s", master, slave);
@@ -1661,18 +1667,21 @@ glusterd_get_pid_from_file (char *master, char *slave, pid_t *pid)
                 goto out;
         }
 
+        if (pfd < 0)
+                goto out;
+
         ret = read (pfd, buff, 1024);
         if (ret < 0) {
                 gf_log ("", GF_LOG_ERROR, GEOREP" cannot read pid from pid-file");
                 goto out;
         }
 
-        close(pfd);
 
         *pid = strtol (buff, NULL, 10);
         ret = 0;
 
- out:
+out:
+        sys_close(pfd);
         return ret;
 }
 
@@ -1719,14 +1728,15 @@ glusterd_do_gsync_log_rotation_mst_slv (glusterd_volinfo_t *volinfo, char *slave
         uuid_t           uuid = {0, };
         glusterd_conf_t *priv = NULL;
         int              ret  = 0;
-        char errmsg[1024] = {0,};
+        char             errmsg[1024] = {0,};
+        xlator_t        *this    = NULL;
 
         GF_ASSERT (volinfo);
         GF_ASSERT (slave);
         GF_ASSERT (THIS);
-        GF_ASSERT (THIS->private);
-
-        priv = THIS->private;
+        this = THIS;
+        GF_ASSERT (this->private);
+        priv = this->private;
 
         ret = glusterd_gsync_get_uuid (slave, volinfo, uuid);
         if ((ret == 0) && (uuid_compare (priv->uuid, uuid) != 0))
@@ -1735,7 +1745,7 @@ glusterd_do_gsync_log_rotation_mst_slv (glusterd_volinfo_t *volinfo, char *slave
         if (ret) {
                 snprintf(errmsg, sizeof(errmsg), "geo-replication session b/w %s %s not active",
                          volinfo->volname, slave);
-                gf_log ("", GF_LOG_WARNING, errmsg);
+                gf_log (this->name, GF_LOG_WARNING, "%s", errmsg);
                 if (op_errstr)
                         *op_errstr = gf_strdup(errmsg);
                 goto out;
@@ -1744,7 +1754,7 @@ glusterd_do_gsync_log_rotation_mst_slv (glusterd_volinfo_t *volinfo, char *slave
         ret = glusterd_do_gsync_log_rotate (volinfo->volname, slave, &uuid, op_errstr);
 
  out:
-        gf_log ("", GF_LOG_DEBUG, "Returning with %d", ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning with %d", ret);
         return ret;
 }
 
@@ -1827,7 +1837,7 @@ glusterd_rotate_gsync_logs (dict_t *dict, char **op_errstr, dict_t *rsp_dict)
         if ((ret) || (!exists)) {
                 snprintf (errmsg, sizeof(errmsg), "Volume %s does not"
                           " exist", volname);
-                gf_log ("", GF_LOG_WARNING, errmsg);
+                gf_log ("", GF_LOG_WARNING, "%s", errmsg);
                 *op_errstr = gf_strdup (errmsg);
                 ret = -1;
                 goto out;

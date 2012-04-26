@@ -21,6 +21,7 @@
 #define __AFR_SELF_HEAL_COMMON_H__
 
 #define FILE_HAS_HOLES(buf) (((buf)->ia_size) > ((buf)->ia_blocks * 512))
+#define AFR_SH_MIN_PARTICIPANTS 2
 
 typedef enum {
         AFR_SELF_HEAL_ENTRY,
@@ -90,7 +91,7 @@ afr_sh_common_lookup_resp_handler (call_frame_t *frame, void *cookie,
 int
 afr_sh_common_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
                       afr_lookup_done_cbk_t lookup_cbk, uuid_t uuid,
-                      int32_t flags);
+                      int32_t flags, dict_t *xdata);
 int
 afr_sh_entry_expunge_remove (call_frame_t *expunge_frame, xlator_t *this,
                              int active_src, struct iatt *buf,
@@ -118,11 +119,16 @@ afr_sh_mark_source_sinks (call_frame_t *frame, xlator_t *this);
 typedef int
 (*afr_fxattrop_cbk_t) (call_frame_t *frame, void *cookie,
                        xlator_t *this, int32_t op_ret, int32_t op_errno,
-                       dict_t *xattr);
+                       dict_t *xattr, dict_t *xdata);
 int
-afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name,
-                     uuid_t gfid);
+afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name);
 int
 afr_impunge_frame_create (call_frame_t *frame, xlator_t *this,
                           int active_source, call_frame_t **impunge_frame);
+void
+afr_sh_reset (call_frame_t *frame, xlator_t *this);
+
+void
+afr_children_intersection_get (int32_t *set1, int32_t *set2,
+                               int *intersection, unsigned int child_count);
 #endif /* __AFR_SELF_HEAL_COMMON_H__ */

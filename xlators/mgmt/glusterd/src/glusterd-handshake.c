@@ -40,11 +40,13 @@
 extern struct rpc_clnt_program gd_peer_prog;
 extern struct rpc_clnt_program gd_mgmt_prog;
 
+#define TRUSTED_PREFIX         "trusted-"
+
 typedef ssize_t (*gfs_serialize_t) (struct iovec outmsg, void *data);
 
 static size_t
 build_volfile_path (const char *volname, char *path,
-                    size_t path_len)
+                    size_t path_len, char *trusted_str)
 {
         struct stat         stbuf       = {0,};
         int32_t             ret         = -1;
@@ -61,7 +63,7 @@ build_volfile_path (const char *volname, char *path,
         if (strstr (volname, "gluster/")) {
                 server = strchr (volname, '/') + 1;
                 glusterd_get_nodesvc_volfile (server, priv->workdir,
-                                                    path, path_len);
+                                              path, path_len);
                 ret = 1;
                 goto out;
         } else if (volname[0] != '/') {
@@ -86,20 +88,27 @@ build_volfile_path (const char *volname, char *path,
                 if (ret)
                         goto out;
         }
+
+        if (!glusterd_auth_get_username (volinfo))
+                trusted_str = NULL;
+
         ret = snprintf (path, path_len, "%s/vols/%s/%s.vol",
                         priv->workdir, volinfo->volname, volname);
         if (ret == -1)
                 goto out;
 
         ret = stat (path, &stbuf);
+
         if ((ret == -1) && (errno == ENOENT)) {
-                ret = snprintf (path, path_len, "%s/vols/%s/%s-fuse.vol",
-                                priv->workdir, volinfo->volname, volname);
+                snprintf (path, path_len, "%s/vols/%s/%s%s-fuse.vol",
+                          priv->workdir, volinfo->volname,
+                          (trusted_str ? trusted_str : ""), dup_volname);
                 ret = stat (path, &stbuf);
         }
+
         if ((ret == -1) && (errno == ENOENT)) {
-                ret = snprintf (path, path_len, "%s/vols/%s/%s-tcp.vol",
-                                priv->workdir, volinfo->volname, volname);
+                snprintf (path, path_len, "%s/vols/%s/%s-tcp.vol",
+                          priv->workdir, volinfo->volname, volname);
         }
 
         ret = 1;
@@ -112,20 +121,23 @@ out:
 int
 server_getspec (rpcsvc_request_t *req)
 {
-        int32_t               ret = -1;
-        int32_t               op_errno = 0;
-        int32_t               spec_fd = -1;
-        size_t                file_len = 0;
-        char                  filename[ZR_PATH_MAX] = {0,};
-        struct stat           stbuf = {0,};
-        char                 *volume = NULL;
-        int                   cookie = 0;
+        int32_t               ret                    = -1;
+        int32_t               op_errno               = 0;
+        int32_t               spec_fd                = -1;
+        size_t                file_len               = 0;
+        char                  filename[ZR_PATH_MAX]  = {0,};
+        struct stat           stbuf                  = {0,};
+        char                 *volume                 = NULL;
+        char                 *tmp                    = NULL;
+        int                   cookie                 = 0;
+        rpc_transport_t      *trans                  = NULL;
+        gf_getspec_req        args                   = {0,};
+        gf_getspec_rsp        rsp                    = {0,};
+        char                  addrstr[RPCSVC_PEER_STRLEN] = {0};
 
-        gf_getspec_req    args = {0,};
-        gf_getspec_rsp    rsp  = {0,};
 
-
-        if (!xdr_to_generic (req->msg[0], &args, (xdrproc_t)xdr_gf_getspec_req)) {
+        if (!xdr_to_generic (req->msg[0], &args,
+                             (xdrproc_t)xdr_gf_getspec_req)) {
                 //failed to decode msg;
                 req->rpc_err = GARBAGE_ARGS;
                 goto fail;
@@ -133,7 +145,25 @@ server_getspec (rpcsvc_request_t *req)
 
         volume = args.key;
 
-        ret = build_volfile_path (volume, filename, sizeof (filename));
+        trans = req->trans;
+        ret = rpcsvc_transport_peername (trans, (char *)&addrstr,
+                                         sizeof (addrstr));
+        if (ret)
+                goto fail;
+
+        tmp = strrchr (addrstr, ':');
+        *tmp = '\0';
+
+        /* we trust the local admin */
+        if (!glusterd_is_local_addr (addrstr)) {
+
+                ret = build_volfile_path (volume, filename,
+                                          sizeof (filename),
+                                          TRUSTED_PREFIX);
+        } else {
+                ret = build_volfile_path (volume, filename,
+                                          sizeof (filename), NULL);
+        }
 
         if (ret > 0) {
                 /* to allocate the proper buffer to hold the file data */
@@ -179,22 +209,83 @@ fail:
                 rsp.op_errno = cookie;
 
         if (!rsp.spec)
-                rsp.spec = "";
+                rsp.spec = strdup ("");
 
         glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
                                (xdrproc_t)xdr_gf_getspec_rsp);
         if (args.key)
                 free (args.key);//malloced by xdr
-        if (rsp.spec && (strcmp (rsp.spec, "")))
+        if (rsp.spec)
                 free (rsp.spec);
 
         return 0;
 }
 
+int32_t
+server_event_notify (rpcsvc_request_t *req)
+{
+        int32_t                 ret             = -1;
+        int32_t                 op_errno        =  0;
+        gf_event_notify_req     args            = {0,};
+        gf_event_notify_rsp     rsp             = {0,};
+        dict_t                 *dict            = NULL;
+        gf_boolean_t            need_rsp        = _gf_true;
 
+        if (!xdr_to_generic (req->msg[0], &args,
+            (xdrproc_t)xdr_gf_event_notify_req)) {
+                req->rpc_err = GARBAGE_ARGS;
+                goto fail;
+        }
+
+        if (args.dict.dict_len) {
+                dict = dict_new ();
+                if (!dict)
+                        return ret;
+                ret = dict_unserialize (args.dict.dict_val,
+                                        args.dict.dict_len, &dict);
+                if (ret) {
+                        gf_log ("", GF_LOG_ERROR, "Failed to unserialize req");
+                        goto fail;
+                }
+        }
+
+        switch (args.op) {
+        case GF_EN_DEFRAG_STATUS:
+                gf_log ("", GF_LOG_INFO,
+                        "recieved defrag status updated");
+                if (dict) {
+                        glusterd_defrag_event_notify_handle (dict);
+                        need_rsp = _gf_false;
+                }
+                break;
+        default:
+                gf_log ("", GF_LOG_ERROR, "Unkown op recieved in in event "
+                        "notify");
+                ret = -1;
+                break;
+        }
+
+fail:
+        rsp.op_ret   = ret;
+
+        if (op_errno)
+                rsp.op_errno = gf_errno_to_error (op_errno);
+
+        if (need_rsp)
+                glusterd_submit_reply (req, &rsp, NULL, 0, NULL,
+                                       (xdrproc_t)xdr_gf_event_notify_rsp);
+        if (dict)
+                dict_unref (dict);
+        if (args.dict.dict_val)
+                free (args.dict.dict_val);//malloced by xdr
+
+        return 0;
+}
 rpcsvc_actor_t gluster_handshake_actors[] = {
         [GF_HNDSK_NULL]      = {"NULL",      GF_HNDSK_NULL,      NULL, NULL, NULL, 0},
         [GF_HNDSK_GETSPEC]   = {"GETSPEC",   GF_HNDSK_GETSPEC,   server_getspec, NULL, NULL, 0},
+        [GF_HNDSK_EVENT_NOTIFY] = {"EVENTNOTIFY", GF_HNDSK_EVENT_NOTIFY, server_event_notify,
+                                    NULL, NULL, 0},
 };
 
 

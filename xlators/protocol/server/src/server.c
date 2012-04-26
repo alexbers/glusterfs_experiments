@@ -36,6 +36,36 @@
 #include "authenticate.h"
 #include "rpcsvc.h"
 
+void
+grace_time_handler (void *data)
+{
+        server_connection_t     *conn = NULL;
+        xlator_t                *this = NULL;
+        gf_boolean_t            cancelled = _gf_false;
+        gf_boolean_t            detached = _gf_false;
+
+        conn = data;
+        this = conn->this;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, conn, out);
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+
+        gf_log (this->name, GF_LOG_INFO, "grace timer expired for %s", conn->id);
+
+        cancelled = server_cancel_conn_timer (this, conn);
+        if (cancelled) {
+                //conn should not be destroyed in conn_put, so take a ref.
+                server_conn_ref (conn);
+                server_connection_put (this, conn, &detached);
+                if (detached)//reconnection did not happen :-(
+                        server_connection_cleanup (this, conn,
+                                                  INTERNAL_LOCKS | POSIX_LOCKS);
+                server_conn_unref (conn);
+        }
+out:
+        return;
+}
+
 struct iobuf *
 gfs_serialize_reply (rpcsvc_request_t *req, void *arg, struct iovec *outmsg,
                      xdrproc_t xdrproc)
@@ -98,7 +128,8 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
         struct iovec            rsp        = {0,};
         server_state_t         *state      = NULL;
         char                    new_iobref = 0;
-        server_connection_t    *conn  = NULL;
+        server_connection_t    *conn       = NULL;
+        gf_boolean_t            lk_heal    = _gf_false;
 
         GF_VALIDATE_OR_GOTO ("server", req, ret);
 
@@ -107,6 +138,9 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
                 frame->local = NULL;
                 conn  = SERVER_CONNECTION(frame);
         }
+
+        if (conn)
+                lk_heal = ((server_conf_t *) conn->this->private)->lk_heal;
 
         if (!iobref) {
                 iobref = iobref_new ();
@@ -140,8 +174,14 @@ server_submit_reply (call_frame_t *frame, rpcsvc_request_t *req, void *arg,
         iobuf_unref (iob);
         if (ret == -1) {
                 gf_log_callingfn ("", GF_LOG_ERROR, "Reply submission failed");
-                if (frame && conn)
-                        server_connection_cleanup (frame->this, conn);
+                if (frame && conn && !lk_heal) {
+                        server_connection_cleanup (frame->this, conn,
+                                                  INTERNAL_LOCKS | POSIX_LOCKS);
+                } else {
+                        /* TODO: Failure of open(dir), create, inodelk, entrylk
+                           or lk fops send failure must be handled specially. */
+                        ;
+                }
                 goto ret;
         }
 
@@ -152,6 +192,8 @@ ret:
         }
 
         if (frame) {
+                if (frame->root->trans)
+                        server_conn_unref (frame->root->trans);
                 STACK_DESTROY (frame->root);
         }
 
@@ -267,28 +309,40 @@ server_priv_to_dict (xlator_t *this, dict_t *dict)
                 return 0;
         //TODO: Dump only specific info to dict
 
-        list_for_each_entry (xprt, &conf->xprt_list, list) {
-                peerinfo = &xprt->peerinfo;
-                memset (key, 0, sizeof (key));
-                snprintf (key, sizeof (key), "client%d.hostname", count);
-                ret = dict_set_str (dict, key, peerinfo->identifier);
-                if (ret)
-                        goto out;
+        pthread_mutex_lock (&conf->mutex);
+        {
+                list_for_each_entry (xprt, &conf->xprt_list, list) {
+                        peerinfo = &xprt->peerinfo;
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.hostname",
+                                  count);
+                        ret = dict_set_str (dict, key, peerinfo->identifier);
+                        if (ret)
+                                goto unlock;
 
-                memset (key, 0, sizeof (key));
-                snprintf (key, sizeof (key), "client%d.bytesread", count);
-                ret = dict_set_uint64 (dict, key, xprt->total_bytes_read);
-                if (ret)
-                        goto out;
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.bytesread",
+                                  count);
+                        ret = dict_set_uint64 (dict, key,
+                                               xprt->total_bytes_read);
+                        if (ret)
+                                goto unlock;
 
-                memset (key, 0, sizeof (key));
-                snprintf (key, sizeof (key), "client%d.byteswrite", count);
-                ret = dict_set_uint64 (dict, key, xprt->total_bytes_write);
-                if (ret)
-                        goto out;
+                        memset (key, 0, sizeof (key));
+                        snprintf (key, sizeof (key), "client%d.byteswrite",
+                                  count);
+                        ret = dict_set_uint64 (dict, key,
+                                               xprt->total_bytes_write);
+                        if (ret)
+                                goto unlock;
 
-                count++;
+                        count++;
+                }
         }
+unlock:
+        pthread_mutex_unlock (&conf->mutex);
+        if (ret)
+                goto out;
 
         ret = dict_set_int32 (dict, "clientcount", count);
 
@@ -312,10 +366,14 @@ server_priv (xlator_t *this)
         if (!conf)
                 return 0;
 
-        list_for_each_entry (xprt, &conf->xprt_list, list) {
-                total_read  += xprt->total_bytes_read;
-                total_write += xprt->total_bytes_write;
+        pthread_mutex_lock (&conf->mutex);
+        {
+                list_for_each_entry (xprt, &conf->xprt_list, list) {
+                        total_read  += xprt->total_bytes_read;
+                        total_write += xprt->total_bytes_write;
+                }
         }
+        pthread_mutex_unlock (&conf->mutex);
 
         gf_proc_dump_build_key(key, "server", "total-bytes-read");
         gf_proc_dump_write(key, "%"PRIu64, total_read);
@@ -387,6 +445,7 @@ server_inode (xlator_t *this)
         char                 key[GF_DUMP_MAX_BUF_LEN];
         int                  i = 1;
         int                  ret = -1;
+        xlator_t             *prev_bound_xl = NULL;
 
         GF_VALIDATE_OR_GOTO ("server", this, out);
 
@@ -406,6 +465,17 @@ server_inode (xlator_t *this)
 
         list_for_each_entry (trav, &conf->conns, list) {
                 if (trav->bound_xl && trav->bound_xl->itable) {
+                        /* Presently every brick contains only one
+                         * bound_xl for all connections. This will lead
+                         * to duplicating of the inode lists, if listing
+                         * is done for every connection. This simple check
+                         * prevents duplication in the present case. If
+                         * need arises the check can be improved.
+                         */
+                        if (trav->bound_xl == prev_bound_xl)
+                                continue;
+                        prev_bound_xl = trav->bound_xl;
+
                         gf_proc_dump_build_key(key,
                                                "conn","%d.bound_xl.%s",
                                                i, trav->bound_xl->name);
@@ -469,6 +539,7 @@ validate_auth_options (xlator_t *this, dict_t *dict)
         xlator_list_t *trav = NULL;
         data_pair_t   *pair = NULL;
         char          *tail = NULL;
+        char          *tmp_addr_list = NULL;
         char          *addr = NULL;
         char          *tmp_str = NULL;
 
@@ -504,16 +575,16 @@ validate_auth_options (xlator_t *this, dict_t *dict)
                                      goto out;
                                 }
 
-                                addr = strtok_r (pair->value->data, ",",
+                                tmp_addr_list = gf_strdup (pair->value->data);
+                                addr = strtok_r (tmp_addr_list, ",",
                                                 &tmp_str);
                                 if (!addr)
                                         addr = pair->value->data;
 
                                 while (addr) {
 
-                                        if (valid_internet_address (addr) ||
-                                        valid_wildcard_internet_address (addr))
-                                        {
+                                        if (valid_internet_address
+                                                        (addr, _gf_true)) {
                                                 error = 0;
                                         } else {
                                                 error = -1;
@@ -531,6 +602,8 @@ validate_auth_options (xlator_t *this, dict_t *dict)
                                                 addr = NULL;
                                 }
 
+                                GF_FREE (tmp_addr_list);
+                                tmp_addr_list = NULL;
                         }
 
                 }
@@ -546,6 +619,8 @@ validate_auth_options (xlator_t *this, dict_t *dict)
         }
 
 out:
+        if (tmp_addr_list)
+                GF_FREE (tmp_addr_list);
         return error;
 }
 
@@ -554,11 +629,11 @@ int
 server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
                    void *data)
 {
-        xlator_t            *this = NULL;
-        rpc_transport_t     *xprt = NULL;
-        server_connection_t *conn = NULL;
-        server_conf_t       *conf = NULL;
-
+        gf_boolean_t         detached   = _gf_false;
+        xlator_t            *this       = NULL;
+        rpc_transport_t     *xprt       = NULL;
+        server_connection_t *conn       = NULL;
+        server_conf_t       *conf       = NULL;
 
         if (!xl || !data) {
                 gf_log_callingfn ("server", GF_LOG_WARNING,
@@ -583,26 +658,69 @@ server_rpc_notify (rpcsvc_t *rpc, void *xl, rpcsvc_event_t event,
                 */
                 INIT_LIST_HEAD (&xprt->list);
 
-                list_add_tail (&xprt->list, &conf->xprt_list);
+                pthread_mutex_lock (&conf->mutex);
+                {
+                        list_add_tail (&xprt->list, &conf->xprt_list);
+                }
+                pthread_mutex_unlock (&conf->mutex);
 
                 break;
         }
         case RPCSVC_EVENT_DISCONNECT:
+                /* transport has to be removed from the list upon disconnect
+                 * irrespective of whether lock self heal is off or on, since
+                 * new transport will be created upon reconnect.
+                 */
+                pthread_mutex_lock (&conf->mutex);
+                {
+                        list_del_init (&xprt->list);
+                }
+                pthread_mutex_unlock (&conf->mutex);
+
                 conn = get_server_conn_state (this, xprt);
-                if (conn)
-                        server_connection_cleanup (this, conn);
+                if (!conn)
+                        break;
 
-                gf_log (this->name, GF_LOG_INFO,
-                        "disconnected connection from %s",
-                        xprt->peerinfo.identifier);
+                gf_log (this->name, GF_LOG_INFO, "disconnecting connection"
+                        "from %s", conn->id);
 
-                list_del (&xprt->list);
+                /* If lock self heal is off, then destroy the
+                   conn object, else register a grace timer event */
+                if (!conf->lk_heal) {
+                        server_conn_ref (conn);
+                        server_connection_put (this, conn, &detached);
+                        if (detached)
+                                server_connection_cleanup (this, conn,
+                                                           INTERNAL_LOCKS |
+                                                           POSIX_LOCKS);
+                        server_conn_unref (conn);
+                } else {
+                        put_server_conn_state (this, xprt);
+                        server_connection_cleanup (this, conn, INTERNAL_LOCKS);
 
+                        pthread_mutex_lock (&conn->lock);
+                        {
+                                if (conn->timer)
+                                        goto unlock;
+
+                                gf_log (this->name, GF_LOG_INFO, "starting a grace "
+                                        "timer for %s", conn->id);
+
+                                conn->timer = gf_timer_call_after (this->ctx,
+                                                                   conf->grace_tv,
+                                                                   grace_time_handler,
+                                                                   conn);
+                        }
+                unlock:
+                        pthread_mutex_unlock (&conn->lock);
+                }
                 break;
         case RPCSVC_EVENT_TRANSPORT_DESTROY:
-                conn = get_server_conn_state (this, xprt);
-                if (conn)
-                        server_connection_put (this, conn);
+                /*- conn obj has been disassociated from xprt on first
+                 *  disconnect.
+                 *  conn cleanup and destruction is handed over to
+                 *  grace_time_handler or the subsequent handler that 'owns'
+                 *  the conn. Nothing left to be done here. */
                 break;
         default:
                 break;
@@ -666,6 +784,43 @@ _copy_auth_opt (dict_t *unused,
                 dict_set ((dict_t *)xl_dict, key, (value));
 }
 
+
+int
+server_init_grace_timer (xlator_t *this, dict_t *options,
+                         server_conf_t *conf)
+{
+        int32_t   ret            = -1;
+        int32_t   grace_timeout  = -1;
+        char     *lk_heal        = NULL;
+
+        GF_VALIDATE_OR_GOTO ("server", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, options, out);
+        GF_VALIDATE_OR_GOTO (this->name, conf, out);
+
+        conf->lk_heal = _gf_false;
+
+        ret = dict_get_str (options, "lk-heal", &lk_heal);
+        if (!ret)
+                gf_string2boolean (lk_heal, &conf->lk_heal);
+
+        gf_log (this->name, GF_LOG_DEBUG, "lk-heal = %s",
+                (conf->lk_heal) ? "on" : "off");
+
+        ret = dict_get_int32 (options, "grace-timeout", &grace_timeout);
+        if (!ret)
+                conf->grace_tv.tv_sec = grace_timeout;
+        else
+                conf->grace_tv.tv_sec = 10;
+
+        gf_log (this->name, GF_LOG_DEBUG, "Server grace timeout "
+                "value = %"PRIu64, conf->grace_tv.tv_sec);
+
+        conf->grace_tv.tv_usec  = 0;
+
+        ret = 0;
+out:
+        return ret;
+}
 
 int
 reconfigure (xlator_t *this, dict_t *options)
@@ -761,6 +916,7 @@ reconfigure (xlator_t *this, dict_t *options)
                                         "Reconfigure not found for transport" );
                 }
         }
+        ret = server_init_grace_timer (this, options, conf);
 
 out:
         gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
@@ -796,6 +952,10 @@ init (xlator_t *this)
         INIT_LIST_HEAD (&conf->conns);
         INIT_LIST_HEAD (&conf->xprt_list);
         pthread_mutex_init (&conf->mutex, NULL);
+
+        ret = server_init_grace_timer (this, this->options, conf);
+        if (ret)
+                goto out;
 
         ret = server_build_config (this, conf);
         if (ret)
@@ -839,8 +999,7 @@ init (xlator_t *this)
         }
 
         /* RPC related */
-        //conf->rpc = rpc_svc_init (&conf->rpc_conf);
-        conf->rpc = rpcsvc_init (this, this->ctx, this->options);
+        conf->rpc = rpcsvc_init (this, this->ctx, this->options, 0);
         if (conf->rpc == NULL) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "creation of rpcsvc failed");
@@ -1013,7 +1172,8 @@ struct volume_options options[] = {
         { .key   = {"inode-lru-limit"},
           .type  = GF_OPTION_TYPE_INT,
           .min   = 0,
-          .max   = (1 * GF_UNIT_MB)
+          .max   = (1 * GF_UNIT_MB),
+          .default_value = "16384",
         },
         { .key   = {"verify-volfile-checksum"},
           .type  = GF_OPTION_TYPE_BOOL
@@ -1030,7 +1190,40 @@ struct volume_options options[] = {
         },
         { .key           = {"statedump-path"},
           .type          = GF_OPTION_TYPE_PATH,
-          .default_value = "/tmp"
+          .default_value = "/tmp",
+          .description = "Specifies directory in which gluster should save its"
+                         " statedumps. By default it is the /tmp directory"
         },
+        { .key   = {"lk-heal"},
+          .type  = GF_OPTION_TYPE_BOOL,
+          .default_value = "off",
+        },
+        {.key  = {"grace-timeout"},
+         .type = GF_OPTION_TYPE_INT,
+         .min  = 10,
+         .max  = 1800,
+        },
+        {.key  = {"tcp-window-size"},
+         .type = GF_OPTION_TYPE_SIZET,
+         .min  = GF_MIN_SOCKET_WINDOW_SIZE,
+         .max  = GF_MAX_SOCKET_WINDOW_SIZE
+        },
+
+        /*  The following two options are defined in addr.c, redifined here *
+         * for the sake of validation during volume set from cli            */
+
+        { .key   = {"auth.addr.*.allow"},
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
+          .description = "Allow a comma separated list of addresses and/or "
+                         "hostnames to connect to the server. By default, all"
+                         " connections are allowed."
+        },
+        { .key   = {"auth.addr.*.reject"},
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
+          .description = "Reject a comma separated list of addresses and/or "
+                         "hostnames to connect to the server. By default, all"
+                         " connections are allowed."
+        },
+
         { .key   = {NULL} },
 };

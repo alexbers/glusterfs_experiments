@@ -100,6 +100,10 @@ struct nfs_fop_local {
         char            newpath[NFS_NAME_MAX + 1];
         xlator_t        *nfsx;
         dict_t          *dictgfid;
+
+        fd_t            *fd;
+        int             cmd;
+        struct gf_flock flock;
 };
 
 extern struct nfs_fop_local *
@@ -134,7 +138,7 @@ nfs_fop_local_wipe (xlator_t *xl, struct nfs_fop_local *l);
 
 #define nfs_fop_handle_local_init(fram,nfx, nfloc, cbck,prgloc,retval,lab)  \
         do {                                                                \
-                prog_data_to_nfl (nfx, nfloc, fram, cbck, prgloc);          \
+                prog_data_to_nfl (nfx, nfloc, fram, cbck, prgloc);      \
                 if (!nfloc) {                                               \
                         gf_log (GF_NFS,GF_LOG_ERROR,"Failed to init local");\
                         retval = -ENOMEM;                                   \
@@ -185,7 +189,7 @@ nfs_fop_write (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, fd_t *fd,
 
 extern int
 nfs_fop_open (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, loc_t *loc,
-              int32_t flags, fd_t *fd, int32_t wbflags, fop_open_cbk_t cbk,
+              int32_t flags, fd_t *fd, fop_open_cbk_t cbk,
               void *local);
 
 extern int
@@ -236,4 +240,9 @@ nfs_fop_stat (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, loc_t *loc,
 extern int
 nfs_fop_access (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, loc_t *loc,
                 int32_t accesstest, fop_access_cbk_t cbk, void *local);
+
+extern int
+nfs_fop_lk (xlator_t *nfsx, xlator_t *xl, nfs_user_t *nfu, fd_t *fd,
+            int cmd, struct gf_flock *flock, fop_lk_cbk_t cbk, void *local);
+
 #endif

@@ -35,7 +35,8 @@
 
 int
 dht_du_info_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-		 int op_ret, int op_errno, struct statvfs *statvfs)
+		 int op_ret, int op_errno, struct statvfs *statvfs,
+                 dict_t *xdata)
 {
 	dht_conf_t    *conf         = NULL;
 	call_frame_t  *prev          = NULL;
@@ -105,6 +106,7 @@ dht_get_du_info_for_subvol (xlator_t *this, int subvol_idx)
 	call_frame_t  *statfs_frame = NULL;
 	dht_local_t   *statfs_local = NULL;
 	call_pool_t   *pool         = NULL;
+	loc_t          tmp_loc      = {0,};
 
 	conf = this->private;
 	pool = this->ctx->pool;
@@ -121,15 +123,14 @@ dht_get_du_info_for_subvol (xlator_t *this, int subvol_idx)
 		goto err;
 	}
 
-	loc_t tmp_loc = { .inode = NULL,
-			  .path = "/",
-	};
+        /* make it root gfid, should be enough to get the proper info back */
+        tmp_loc.gfid[15] = 1;
 
 	statfs_local->call_cnt = 1;
 	STACK_WIND (statfs_frame, dht_du_info_cbk,
 		    conf->subvolumes[subvol_idx],
 		    conf->subvolumes[subvol_idx]->fops->statfs,
-		    &tmp_loc);
+		    &tmp_loc, NULL);
 
 	return 0;
 err:
@@ -142,15 +143,21 @@ err:
 int
 dht_get_du_info (call_frame_t *frame, xlator_t *this, loc_t *loc)
 {
-	int            i = 0;
+	int            i            = 0;
 	dht_conf_t    *conf         = NULL;
 	call_frame_t  *statfs_frame = NULL;
 	dht_local_t   *statfs_local = NULL;
-	struct timeval tv = {0,};
+	struct timeval tv           = {0,};
+        loc_t          tmp_loc      = {0,};
 
 	conf  = this->private;
 
 	gettimeofday (&tv, NULL);
+
+        /* make it root gfid, should be enough to get the proper
+           info back */
+        tmp_loc.gfid[15] = 1;
+
 	if (tv.tv_sec > (conf->refresh_interval
 			 + conf->last_stat_fetch.tv_sec)) {
 
@@ -166,16 +173,12 @@ dht_get_du_info (call_frame_t *frame, xlator_t *this, loc_t *loc)
 			goto err;
 		}
 
-		loc_t tmp_loc = { .inode = NULL,
-				  .path = "/",
-		};
-
 		statfs_local->call_cnt = conf->subvolume_cnt;
 		for (i = 0; i < conf->subvolume_cnt; i++) {
 			STACK_WIND (statfs_frame, dht_du_info_cbk,
 				    conf->subvolumes[i],
 				    conf->subvolumes[i]->fops->statfs,
-				    &tmp_loc);
+				    &tmp_loc, NULL);
 		}
 
 		conf->last_stat_fetch.tv_sec = tv.tv_sec;

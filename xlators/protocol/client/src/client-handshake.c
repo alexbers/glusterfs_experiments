@@ -22,6 +22,7 @@
 #include "config.h"
 #endif
 
+#include "fd-lk.h"
 #include "client.h"
 #include "xlator.h"
 #include "defaults.h"
@@ -38,6 +39,18 @@ extern rpc_clnt_prog_t clnt_pmap_prog;
 
 int client_ping_cbk (struct rpc_req *req, struct iovec *iov, int count,
                      void *myframe);
+
+int client_set_lk_version_cbk (struct rpc_req *req, struct iovec *iov,
+                               int count, void *myframe);
+
+int client_set_lk_version (xlator_t *this);
+
+typedef struct client_fd_lk_local {
+        int             ref;
+        gf_boolean_t    error;
+        gf_lock_t       lock;
+        clnt_fd_ctx_t *fdctx;
+}clnt_fd_lk_local_t;
 
 /* Handshake */
 
@@ -214,14 +227,14 @@ client_start_ping (void *data)
         ret = client_submit_request (this, NULL, frame, conf->handshake,
                                      GF_HNDSK_PING, client_ping_cbk, NULL,
                                      NULL, 0, NULL, 0, NULL, (xdrproc_t)NULL);
-        if (ret)
-                goto fail;
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "failed to start ping timer");
+        }
 
         return;
-fail:
-        gf_log (THIS->name, GF_LOG_ERROR,
-                "failed to start ping timer");
 
+fail:
         if (frame) {
                 STACK_DESTROY (frame->root);
         }
@@ -333,7 +346,8 @@ client3_getspec_cbk (struct rpc_req *req, struct iovec *iov, int count,
         }
 
 out:
-        STACK_UNWIND_STRICT (getspec, frame, rsp.op_ret, rsp.op_errno, rsp.spec);
+        CLIENT_STACK_UNWIND (getspec, frame, rsp.op_ret, rsp.op_errno,
+                             rsp.spec);
 
         /* Don't use 'GF_FREE', this is allocated by libc */
         if (rsp.spec)
@@ -363,13 +377,14 @@ int32_t client3_getspec (call_frame_t *frame, xlator_t *this, void *data)
                                      NULL, NULL, 0, NULL, 0, NULL,
                                      (xdrproc_t)xdr_gf_getspec_req);
 
-        if (ret)
-                goto unwind;
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "failed to send the request");
+        }
 
         return 0;
 unwind:
-        gf_log (this->name, GF_LOG_WARNING, "failed to send the request");
-        STACK_UNWIND_STRICT (getspec, frame, -1, op_errno, NULL);
+        CLIENT_STACK_UNWIND (getspec, frame, -1, op_errno, NULL);
         return 0;
 
 }
@@ -391,6 +406,482 @@ client_notify_parents_child_up (xlator_t *this)
 }
 
 int
+clnt_fd_lk_reacquire_failed (xlator_t *this, clnt_fd_ctx_t *fdctx,
+                             clnt_conf_t *conf)
+{
+        int      ret = -1;
+
+        GF_VALIDATE_OR_GOTO ("client", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, conf, out);
+        GF_VALIDATE_OR_GOTO (this->name, fdctx, out);
+
+        pthread_mutex_lock (&conf->lock);
+        {
+                fdctx->remote_fd     = -1;
+                fdctx->lk_heal_state = GF_LK_HEAL_DONE;
+
+                list_add_tail (&fdctx->sfd_pos,
+                               &conf->saved_fds);
+        }
+        pthread_mutex_unlock (&conf->lock);
+
+        ret = 0;
+out:
+        return ret;
+}
+
+int
+client_set_lk_version_cbk (struct rpc_req *req, struct iovec *iov,
+                           int count, void *myframe)
+{
+        int32_t           ret    = -1;
+        call_frame_t     *fr     = NULL;
+        gf_set_lk_ver_rsp rsp    = {0,};
+
+        fr = (call_frame_t *) myframe;
+        GF_VALIDATE_OR_GOTO ("client", fr, out);
+
+        if (req->rpc_status == -1) {
+                gf_log (fr->this->name, GF_LOG_WARNING,
+                        "received RPC status error");
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gf_set_lk_ver_rsp);
+        if (ret < 0)
+                gf_log (fr->this->name, GF_LOG_WARNING,
+                        "xdr decoding failed");
+        else
+                gf_log (fr->this->name, GF_LOG_INFO,
+                        "Server lk version = %d", rsp.lk_ver);
+
+        ret = 0;
+out:
+        //TODO: Check for all released fdctx and destroy them
+        if (fr)
+                STACK_DESTROY (fr->root);
+
+        return ret;
+}
+
+int
+client_set_lk_version (xlator_t *this)
+{
+        int                 ret      = -1;
+        clnt_conf_t        *conf     = NULL;
+        call_frame_t       *frame    = NULL;
+        gf_set_lk_ver_req   req      = {0, };
+
+        conf = (clnt_conf_t *) this->private;
+
+        req.lk_ver = client_get_lk_ver (conf);
+        req.uid    = this->ctx->process_uuid;
+
+        gf_log (this->name, GF_LOG_DEBUG, "Sending SET_LK_VERSION");
+
+        frame = create_frame (this, this->ctx->pool);
+        if (!frame)
+                goto out;
+
+        ret = client_submit_request (this, &req, frame,
+                                     conf->handshake,
+                                     GF_HNDSK_SET_LK_VER,
+                                     client_set_lk_version_cbk,
+                                     NULL, NULL, 0, NULL, 0, NULL,
+                                     (xdrproc_t)xdr_gf_set_lk_ver_req);
+out:
+        if (ret < 0) {
+                //TODO: Check for all released fdctx and destroy them
+                gf_log (this->name, GF_LOG_WARNING,
+                        "Failed to send SET_LK_VERSION to server");
+        }
+
+        return ret;
+}
+
+int
+client_fd_lk_count (fd_lk_ctx_t *lk_ctx)
+{
+        int               count     = 0;
+        fd_lk_ctx_node_t *fd_lk   = NULL;
+
+        GF_VALIDATE_OR_GOTO ("client", lk_ctx, err);
+
+        LOCK (&lk_ctx->lock);
+        {
+                list_for_each_entry (fd_lk, &lk_ctx->lk_list, next)
+                        count++;
+        }
+        UNLOCK (&lk_ctx->lock);
+
+        return count;
+err:
+        return -1;
+}
+
+clnt_fd_lk_local_t *
+clnt_fd_lk_local_ref (xlator_t *this, clnt_fd_lk_local_t *local)
+{
+        GF_VALIDATE_OR_GOTO (this->name, local, out);
+
+        LOCK (&local->lock);
+        {
+                local->ref++;
+        }
+        UNLOCK (&local->lock);
+out:
+        return local;
+}
+
+int
+clnt_fd_lk_local_unref (xlator_t *this, clnt_fd_lk_local_t *local)
+{
+        int   ref = -1;
+
+        GF_VALIDATE_OR_GOTO (this->name, local, out);
+
+        LOCK (&local->lock);
+        {
+                ref = --local->ref;
+        }
+        UNLOCK (&local->lock);
+
+        if (ref == 0) {
+                LOCK_DESTROY (&local->lock);
+                GF_FREE (local);
+        }
+out:
+        return ref;
+}
+
+clnt_fd_lk_local_t *
+clnt_fd_lk_local_create (clnt_fd_ctx_t *fdctx)
+{
+        clnt_fd_lk_local_t *local = NULL;
+
+        local = GF_CALLOC (1, sizeof (clnt_fd_lk_local_t),
+                           gf_client_mt_clnt_fd_lk_local_t);
+        if (!local)
+                goto out;
+
+        local->ref    = 1;
+        local->error  = _gf_false;
+        local->fdctx = fdctx;
+
+        LOCK_INIT (&local->lock);
+out:
+        return local;
+}
+
+void
+clnt_mark_fd_bad (clnt_conf_t *conf, clnt_fd_ctx_t *fdctx)
+{
+        pthread_mutex_lock (&conf->lock);
+        {
+                fdctx->remote_fd = -1;
+        }
+        pthread_mutex_unlock (&conf->lock);
+}
+
+int
+clnt_release_reopen_fd_cbk (struct rpc_req *req, struct iovec *iov,
+                            int count, void *myframe)
+{
+        xlator_t       *this   = NULL;
+        call_frame_t   *frame  = NULL;
+        clnt_conf_t    *conf   = NULL;
+        clnt_fd_ctx_t  *fdctx  = NULL;
+
+        frame  = myframe;
+        this   = frame->this;
+        fdctx  = (clnt_fd_ctx_t *) frame->local;
+        conf   = (clnt_conf_t *) this->private;
+
+        clnt_fd_lk_reacquire_failed (this, fdctx, conf);
+
+        decrement_reopen_fd_count (this, conf);
+
+        frame->local = NULL;
+        STACK_DESTROY (frame->root);
+
+        return 0;
+}
+
+int
+clnt_release_reopen_fd (xlator_t *this, clnt_fd_ctx_t *fdctx)
+{
+        int               ret     = -1;
+        clnt_conf_t      *conf    = NULL;
+        call_frame_t     *frame   = NULL;
+        gfs3_release_req  req     = {{0,},};
+
+        conf = (clnt_conf_t *) this->private;
+
+        frame  = create_frame (THIS, THIS->ctx->pool);
+        if (!frame)
+                goto out;
+
+        frame->local = (void *) fdctx;
+        req.fd       = fdctx->remote_fd;
+
+        ret    = client_submit_request (this, &req, frame, conf->fops,
+                                        GFS3_OP_RELEASE,
+                                        clnt_release_reopen_fd_cbk, NULL,
+                                        NULL, 0, NULL, 0, NULL,
+                                        (xdrproc_t)xdr_gfs3_releasedir_req);
+ out:
+        if (ret) {
+                decrement_reopen_fd_count (this, conf);
+                clnt_fd_lk_reacquire_failed (this, fdctx, conf);
+                if (frame) {
+                        frame->local = NULL;
+                        STACK_DESTROY (frame->root);
+                }
+        }
+        return 0;
+}
+
+int
+clnt_reacquire_lock_error (xlator_t *this, clnt_fd_ctx_t *fdctx,
+                           clnt_conf_t *conf)
+{
+        int32_t   ret       = -1;
+
+        GF_VALIDATE_OR_GOTO ("client", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, fdctx, out);
+        GF_VALIDATE_OR_GOTO (this->name, conf, out);
+
+        clnt_release_reopen_fd (this, fdctx);
+
+        ret = 0;
+out:
+        return ret;
+}
+
+gf_boolean_t
+clnt_fd_lk_local_error_status (xlator_t *this,
+                               clnt_fd_lk_local_t *local)
+{
+        gf_boolean_t error = _gf_false;
+
+        LOCK (&local->lock);
+        {
+                error = local->error;
+        }
+        UNLOCK (&local->lock);
+
+        return error;
+}
+
+int
+clnt_fd_lk_local_mark_error (xlator_t *this,
+                             clnt_fd_lk_local_t *local)
+{
+        int32_t       ret   = -1;
+        clnt_conf_t  *conf  = NULL;
+        gf_boolean_t  error = _gf_false;
+
+        GF_VALIDATE_OR_GOTO ("client", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, local, out);
+
+        conf = (clnt_conf_t *) this->private;
+
+        LOCK (&local->lock);
+        {
+                error        = local->error;
+                local->error = _gf_true;
+        }
+        UNLOCK (&local->lock);
+
+        if (!error)
+                clnt_reacquire_lock_error (this, local->fdctx, conf);
+        ret = 0;
+out:
+        return ret;
+}
+
+int
+client_reacquire_lock_cbk (struct rpc_req *req, struct iovec *iov,
+                           int count, void *myframe)
+{
+        int32_t             ret        = -1;
+        xlator_t           *this       = NULL;
+        gfs3_lk_rsp         rsp        = {0,};
+        call_frame_t       *frame      = NULL;
+        clnt_conf_t        *conf       = NULL;
+        clnt_fd_ctx_t      *fdctx      = NULL;
+        clnt_fd_lk_local_t *local      = NULL;
+        struct gf_flock     lock       = {0,};
+
+        frame = (call_frame_t *) myframe;
+        this  = frame->this;
+        local = (clnt_fd_lk_local_t *) frame->local;
+        conf  = (clnt_conf_t *) this->private;
+
+        if (req->rpc_status == -1) {
+                gf_log ("client", GF_LOG_WARNING,
+                        "request failed at rpc");
+                goto out;
+        }
+
+        ret = xdr_to_generic (*iov, &rsp, (xdrproc_t)xdr_gfs3_lk_rsp);
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_ERROR, "XDR decoding failed");
+                goto out;
+        }
+
+        if (rsp.op_ret == -1) {
+                gf_log (this->name, GF_LOG_ERROR, "lock request failed");
+                ret = -1;
+                goto out;
+        }
+
+        fdctx = local->fdctx;
+
+        gf_proto_flock_to_flock (&rsp.flock, &lock);
+
+        gf_log (this->name, GF_LOG_DEBUG, "%s type lock reacquired on file "
+                "with gfid %s from %"PRIu64 " to %"PRIu64,
+                get_lk_type (lock.l_type), uuid_utoa (fdctx->inode->gfid),
+                lock.l_start, lock.l_start + lock.l_len);
+
+        if (clnt_fd_lk_local_unref (this, local) == 0 &&
+            !clnt_fd_lk_local_error_status (this, local)) {
+                pthread_mutex_lock (&conf->lock);
+                {
+                        fdctx->lk_heal_state = GF_LK_HEAL_DONE;
+
+                        list_add_tail (&fdctx->sfd_pos,
+                                       &conf->saved_fds);
+                }
+                pthread_mutex_unlock (&conf->lock);
+
+                decrement_reopen_fd_count (this, conf);
+        }
+
+        ret = 0;
+out:
+        if (ret < 0) {
+                clnt_fd_lk_local_mark_error (this, local);
+
+                clnt_fd_lk_local_unref (this, local);
+        }
+
+        frame->local = NULL;
+        STACK_DESTROY (frame->root);
+
+        return ret;
+}
+
+int
+_client_reacquire_lock (xlator_t *this, clnt_fd_ctx_t *fdctx)
+{
+        int32_t             ret       = -1;
+        int32_t             gf_cmd    = 0;
+        int32_t             gf_type   = 0;
+        gfs3_lk_req         req       = {{0,},};
+        struct gf_flock     flock     = {0,};
+        fd_lk_ctx_t        *lk_ctx    = NULL;
+        clnt_fd_lk_local_t *local     = NULL;
+        fd_lk_ctx_node_t   *fd_lk     = NULL;
+        call_frame_t       *frame     = NULL;
+        clnt_conf_t        *conf      = NULL;
+
+        conf   = (clnt_conf_t *) this->private;
+        lk_ctx = fdctx->lk_ctx;
+
+        local = clnt_fd_lk_local_create (fdctx);
+        if (!local) {
+                gf_log (this->name, GF_LOG_WARNING, "clnt_fd_lk_local_create "
+                        "failed, aborting reacquring of locks on %s.",
+                        uuid_utoa (fdctx->inode->gfid));
+                clnt_reacquire_lock_error (this, fdctx, conf);
+                goto out;
+        }
+
+        list_for_each_entry (fd_lk, &lk_ctx->lk_list, next) {
+                memcpy (&flock, &fd_lk->user_flock,
+                        sizeof (struct gf_flock));
+
+                /* Always send F_SETLK even if the cmd was F_SETLKW */
+                /* to avoid frame being blocked if lock cannot be granted. */
+                ret = client_cmd_to_gf_cmd (F_SETLK, &gf_cmd);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "client_cmd_to_gf_cmd failed, "
+                                "aborting reacquiring of locks");
+                        break;
+                }
+
+                gf_type   = client_type_to_gf_type (flock.l_type);
+                req.fd    = fdctx->remote_fd;
+                req.cmd   = gf_cmd;
+                req.type  = gf_type;
+                (void) gf_proto_flock_from_flock (&req.flock,
+                                                  &flock);
+
+                memcpy (req.gfid, fdctx->inode->gfid, 16);
+
+                frame = create_frame (THIS, THIS->ctx->pool);
+                if (!frame) {
+                        ret = -1;
+                        break;
+                }
+
+                frame->local          = clnt_fd_lk_local_ref (this, local);
+                frame->root->lk_owner = fd_lk->user_flock.l_owner;
+
+                ret = client_submit_request (this, &req, frame,
+                                             conf->fops, GFS3_OP_LK,
+                                             client_reacquire_lock_cbk,
+                                             NULL, NULL, 0, NULL, 0, NULL,
+                                             (xdrproc_t)xdr_gfs3_lk_req);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "reacquiring locks failed on file with gfid %s",
+                                uuid_utoa (fdctx->inode->gfid));
+                        break;
+                }
+
+                ret   = 0;
+                frame = NULL;
+        }
+
+        if (local)
+                (void) clnt_fd_lk_local_unref (this, local);
+out:
+        return ret;
+}
+
+int
+client_reacquire_lock (xlator_t *this, clnt_fd_ctx_t *fdctx)
+{
+        int32_t          ret       = -1;
+        fd_lk_ctx_t     *lk_ctx    = NULL;
+
+        GF_VALIDATE_OR_GOTO ("client", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, fdctx, out);
+
+        if (client_fd_lk_list_empty (fdctx->lk_ctx, _gf_false)) {
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "fd lock list is empty");
+                decrement_reopen_fd_count (this,
+                                           (clnt_conf_t *)this->private);
+        } else {
+                lk_ctx = fdctx->lk_ctx;
+
+                LOCK (&lk_ctx->lock);
+                {
+                        (void) _client_reacquire_lock (this, fdctx);
+                }
+                UNLOCK (&lk_ctx->lock);
+        }
+        ret = 0;
+out:
+        return ret;
+}
+
+int
 client3_1_reopen_cbk (struct rpc_req *req, struct iovec *iov, int count,
                       void           *myframe)
 {
@@ -402,11 +893,13 @@ client3_1_reopen_cbk (struct rpc_req *req, struct iovec *iov, int count,
         clnt_conf_t   *conf                  = NULL;
         clnt_fd_ctx_t *fdctx                 = NULL;
         call_frame_t  *frame                 = NULL;
+        xlator_t      *this                  = NULL;
 
         frame = myframe;
         if (!frame || !frame->this)
                 goto out;
 
+        this  = frame->this;
         local = frame->local;
         conf  = frame->this->private;
 
@@ -442,7 +935,6 @@ client3_1_reopen_cbk (struct rpc_req *req, struct iovec *iov, int count,
         }
 
         fdctx = local->fdctx;
-
         if (!fdctx) {
                 gf_log (frame->this->name, GF_LOG_WARNING, "fdctx not found");
                 ret = -1;
@@ -453,9 +945,13 @@ client3_1_reopen_cbk (struct rpc_req *req, struct iovec *iov, int count,
         {
                 fdctx->remote_fd = rsp.fd;
                 if (!fdctx->released) {
-                        list_add_tail (&fdctx->sfd_pos, &conf->saved_fds);
-                        if (!list_empty (&fdctx->lock_list))
+                        if (!client_fd_lk_list_empty (fdctx->lk_ctx, _gf_false)) {
                                 attempt_lock_recovery = _gf_true;
+                                fdctx->lk_heal_state  = GF_LK_HEAL_IN_PROGRESS;
+                        } else {
+                                list_add_tail (&fdctx->sfd_pos,
+                                               &conf->saved_fds);
+                        }
                         fdctx = NULL;
                 }
         }
@@ -463,31 +959,33 @@ client3_1_reopen_cbk (struct rpc_req *req, struct iovec *iov, int count,
 
         ret = 0;
 
-        attempt_lock_recovery = _gf_false; /* temporarily */
-
-        if (attempt_lock_recovery) {
-                ret = client_attempt_lock_recovery (frame->this, local->fdctx);
-                if (ret < 0) {
-                        gf_log (frame->this->name, GF_LOG_DEBUG,
-                                "lock recovery not attempted on fd");
-                } else {
-                        gf_log (frame->this->name, GF_LOG_INFO,
-                                "need to attempt lock recovery on %"PRIu64
-                                " open fds", fd_count);
+        if (conf->lk_heal && attempt_lock_recovery) {
+                /* Delay decrementing the reopen fd count untill all the
+                   locks corresponding to this fd are acquired.*/
+                gf_log (this->name, GF_LOG_DEBUG, "acquiring locks "
+                        "on %s", local->loc.path);
+                ret = client_reacquire_lock (frame->this, local->fdctx);
+                if (ret) {
+                        clnt_reacquire_lock_error (this, local->fdctx, conf);
+                        gf_log (this->name, GF_LOG_WARNING, "acquiring locks "
+                                "failed on %s", local->loc.path);
+                        ret = 0;
                 }
         } else {
                 fd_count = decrement_reopen_fd_count (frame->this, conf);
         }
+
 out:
-
-        if (fdctx)
-                client_fdctx_destroy (frame->this, fdctx);
-
-        if ((ret < 0) && frame && frame->this && conf)
+        if (fdctx) {
+                clnt_release_reopen_fd (this, fdctx);
+        } else if ((ret < 0) && frame && frame->this && conf) {
                 decrement_reopen_fd_count (frame->this, conf);
+        }
 
-        frame->local = NULL;
-        STACK_DESTROY (frame->root);
+        if (frame) {
+                frame->local = NULL;
+                STACK_DESTROY (frame->root);
+        }
 
         client_local_wipe (local);
 
@@ -606,7 +1104,7 @@ protocol_client_reopendir (xlator_t *this, clnt_fd_ctx_t *fdctx)
                 goto out;
         }
 
-        local = GF_CALLOC (1, sizeof (*local), gf_client_mt_clnt_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 ret = -1;
                 goto out;
@@ -623,7 +1121,6 @@ protocol_client_reopendir (xlator_t *this, clnt_fd_ctx_t *fdctx)
         }
 
         memcpy (req.gfid, inode->gfid, 16);
-        req.path  = (char *)local->loc.path;
 
         gf_log (frame->this->name, GF_LOG_DEBUG,
                 "attempting reopen on %s", local->loc.path);
@@ -635,15 +1132,14 @@ protocol_client_reopendir (xlator_t *this, clnt_fd_ctx_t *fdctx)
                                      client3_1_reopendir_cbk, NULL,
                                      NULL, 0, NULL, 0, NULL,
                                      (xdrproc_t)xdr_gfs3_opendir_req);
-        if (ret)
-                goto out;
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "failed to send the re-opendir request");
+        }
 
         return ret;
 
 out:
-        gf_log (THIS->name, GF_LOG_ERROR,
-                "failed to send the re-opendir request");
-
         if (frame) {
                 frame->local = NULL;
                 STACK_DESTROY (frame->root);
@@ -693,7 +1189,7 @@ protocol_client_reopen (xlator_t *this, clnt_fd_ctx_t *fdctx)
                 goto out;
         }
 
-        local = GF_CALLOC (1, sizeof (*local), gf_client_mt_clnt_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 ret = -1;
                 goto out;
@@ -706,8 +1202,6 @@ protocol_client_reopen (xlator_t *this, clnt_fd_ctx_t *fdctx)
 
         memcpy (req.gfid, inode->gfid, 16);
         req.flags    = gf_flags_from_flags (fdctx->flags);
-        req.wbflags  = fdctx->wbflags;
-        req.path     = (char *)local->loc.path;
 
         gf_log (frame->this->name, GF_LOG_DEBUG,
                 "attempting reopen on %s", local->loc.path);
@@ -717,15 +1211,14 @@ protocol_client_reopen (xlator_t *this, clnt_fd_ctx_t *fdctx)
                                      GFS3_OP_OPEN, client3_1_reopen_cbk, NULL,
                                      NULL, 0, NULL, 0, NULL,
                                      (xdrproc_t)xdr_gfs3_open_req);
-        if (ret)
-                goto out;
+        if (ret) {
+                gf_log (THIS->name, GF_LOG_ERROR,
+                        "failed to send the re-open request");
+        }
 
         return ret;
 
 out:
-        gf_log (THIS->name, GF_LOG_ERROR,
-                "failed to send the re-open request");
-
         if (frame) {
                 frame->local = NULL;
                 STACK_DESTROY (frame->root);
@@ -794,7 +1287,8 @@ client_post_handshake (call_frame_t *frame, xlator_t *this)
                 }
         } else {
                 gf_log (this->name, GF_LOG_DEBUG,
-                        "no open fds - notifying all parents child up");
+                        "No fds to open - notifying all parents child up");
+                client_set_lk_version (this);
                 client_notify_parents_child_up (this);
         }
 out:
@@ -816,6 +1310,7 @@ client_setvolume_cbk (struct rpc_req *req, struct iovec *iov, int count, void *m
         int32_t               op_ret        = 0;
         int32_t               op_errno      = 0;
         gf_boolean_t          auth_fail     = _gf_false;
+        uint32_t              lk_ver        = 0;
 
         frame = myframe;
         this  = frame->this;
@@ -874,8 +1369,7 @@ client_setvolume_cbk (struct rpc_req *req, struct iovec *iov, int count, void *m
                         remote_error ? remote_error : strerror (op_errno));
                 errno = op_errno;
                 if (remote_error &&
-                   (strncmp ("Authentication failed",remote_error,
-                             sizeof (remote_error)) == 0)) {
+                    (strcmp ("Authentication failed", remote_error) == 0)) {
                         auth_fail = _gf_true;
                         op_ret = 0;
                 }
@@ -897,6 +1391,15 @@ client_setvolume_cbk (struct rpc_req *req, struct iovec *iov, int count, void *m
                 goto out;
         }
 
+        ret = dict_get_uint32 (reply, "clnt-lk-version", &lk_ver);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "failed to find key 'clnt-lk-version' in the options");
+                goto out;
+        }
+
+        gf_log (this->name, GF_LOG_DEBUG, "clnt-lk-version = %d, "
+                "server-lk-version = %d", client_get_lk_ver (conf), lk_ver);
         /* TODO: currently setpeer path is broken */
         /*
         if (process_uuid && req->conn &&
@@ -932,8 +1435,19 @@ client_setvolume_cbk (struct rpc_req *req, struct iovec *iov, int count, void *m
 
         conf->need_different_port = 0;
 
-        /* TODO: more to test */
-        client_post_handshake (frame, frame->this);
+        if (lk_ver != client_get_lk_ver (conf)) {
+                gf_log (this->name, GF_LOG_INFO, "Server and Client "
+                        "lk-version numbers are not same, reopening the fds");
+                client_mark_fd_bad (this);
+                client_post_handshake (frame, frame->this);
+        } else {
+                /*TODO: Traverse the saved fd list, and send
+                  release to the server on fd's that were closed
+                  during grace period */
+                gf_log (this->name, GF_LOG_INFO, "Server and Client "
+                        "lk-version numbers are same, no need to "
+                        "reopen the fds");
+        }
 
 out:
         if (auth_fail) {
@@ -1007,8 +1521,13 @@ client_setvolume (xlator_t *this, struct rpc_clnt *rpc)
                 }
         }
 
-        ret = gf_asprintf (&process_uuid_xl, "%s-%s", this->ctx->process_uuid,
-                           this->name);
+        /* With multiple graphs possible in the same process, we need a
+           field to bring the uniqueness. Graph-ID should be enough to get the
+           job done
+        */
+        ret = gf_asprintf (&process_uuid_xl, "%s-%s-%d",
+                           this->ctx->process_uuid, this->name,
+                           this->graph->id);
         if (-1 == ret) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "asprintf failed while setting process_uuid");
@@ -1043,6 +1562,14 @@ client_setvolume (xlator_t *this, struct rpc_clnt *rpc)
                 if (ret)
                         gf_log (this->name, GF_LOG_ERROR,
                                 "failed to set 'volfile-checksum'");
+        }
+
+        ret = dict_set_int16 (options, "clnt-lk-version",
+                              client_get_lk_ver (conf));
+        if (ret < 0) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "failed to set clnt-lk-version(%"PRIu32") in handshake msg",
+                        client_get_lk_ver (conf));
         }
 
         req.dict.dict_len = dict_serialized_length (options);
@@ -1368,6 +1895,7 @@ char *clnt_handshake_procs[GF_HNDSK_MAXVALUE] = {
         [GF_HNDSK_SETVOLUME]    = "SETVOLUME",
         [GF_HNDSK_GETSPEC]      = "GETSPEC",
         [GF_HNDSK_PING]         = "PING",
+        [GF_HNDSK_SET_LK_VER]   = "SET_LK_VER"
 };
 
 rpc_clnt_prog_t clnt_handshake_prog = {

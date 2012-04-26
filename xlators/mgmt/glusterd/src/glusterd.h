@@ -46,6 +46,7 @@
 #include "protocol-common.h"
 #include "glusterd-pmap.h"
 #include "cli1-xdr.h"
+#include "syncop.h"
 
 #define GLUSTERD_MAX_VOLUME_NAME        1000
 #define DEFAULT_LOG_FILE_DIRECTORY      DATADIR "/log/glusterfs"
@@ -77,6 +78,9 @@ typedef enum glusterd_op_ {
         GD_OP_REBALANCE,
         GD_OP_HEAL_VOLUME,
         GD_OP_STATEDUMP_VOLUME,
+        GD_OP_LIST_VOLUME,
+        GD_OP_CLEARLOCKS_VOLUME,
+        GD_OP_DEFRAG_BRICK_VOLUME,
         GD_OP_MAX,
 } glusterd_op_t;
 
@@ -108,6 +112,7 @@ typedef struct {
         char              workdir[PATH_MAX];
         rpcsvc_t          *rpc;
         nodesrv_t         *shd;
+        nodesrv_t         *nfs;
         struct pmap_registry *pmap;
         struct list_head  volumes;
         struct list_head  xprt_list;
@@ -119,6 +124,8 @@ typedef struct {
 #ifdef DEBUG
         gf_boolean_t      valgrind;
 #endif
+        pthread_t       brick_thread;
+        xlator_t       *xl;  /* Should be set to 'THIS' before creating thread */
 } glusterd_conf_t;
 
 typedef enum gf_brick_status {
@@ -159,9 +166,13 @@ struct glusterd_defrag_info_ {
         uint64_t                     total_files;
         uint64_t                     total_data;
         uint64_t                     num_files_lookedup;
+        uint64_t                     total_failures;
         gf_lock_t                    lock;
         int                          cmd;
         pthread_t                    th;
+        gf_defrag_status_t           defrag_status;
+        struct rpc_clnt            * rpc;
+        uint32_t                     connected;
         char                         mount[1024];
         char                         databuf[131072];
         struct gf_defrag_brickinfo_ *bricks; /* volinfo->brick_count */
@@ -186,6 +197,13 @@ typedef enum gf_rb_status_ {
         GF_RB_STATUS_PAUSED,
 } gf_rb_status_t;
 
+struct _auth {
+        char       *username;
+        char       *password;
+};
+
+typedef struct _auth auth_t;
+
 struct glusterd_volinfo_ {
         char                    volname[GLUSTERD_MAX_VOLUME_NAME];
         int                     type;
@@ -208,6 +226,8 @@ struct glusterd_volinfo_ {
         uint64_t                rebalance_data;
         uint64_t                lookedup_files;
         glusterd_defrag_info_t  *defrag;
+        gf_cli_defrag_type      defrag_cmd;
+        uint64_t                rebalance_failures;
 
         /* Replace brick status */
         gf_rb_status_t          rb_status;
@@ -222,18 +242,23 @@ struct glusterd_volinfo_ {
         dict_t                  *dict;
 
         uuid_t                  volume_id;
+        auth_t                  auth;
         char                    *logdir;
 
         dict_t                  *gsync_slaves;
 
         int                      decommission_in_progress;
         xlator_t                *xl;
+
+        gf_boolean_t             memory_accounting;
 };
 
 typedef enum gd_node_type_ {
         GD_NODE_NONE,
         GD_NODE_BRICK,
-        GD_NODE_SHD
+        GD_NODE_SHD,
+        GD_NODE_REBALANCE,
+        GD_NODE_NFS,
 } gd_node_type;
 
 typedef struct glusterd_pending_node_ {
@@ -312,6 +337,27 @@ typedef ssize_t (*gd_serialize_t) (struct iovec outmsg, void *args);
 		frame->local = NULL;	  \
 		STACK_DESTROY (frame->root);\
 	} while (0)
+
+#define GLUSTERD_GET_DEFRAG_DIR(path, volinfo, priv) do {               \
+                char vol_path[PATH_MAX];                                \
+                GLUSTERD_GET_VOLUME_DIR(vol_path, volinfo, priv);       \
+                snprintf (path, PATH_MAX, "%s/rebalance",vol_path);     \
+        } while (0)
+
+#define GLUSTERD_GET_DEFRAG_SOCK_FILE(path, volinfo, priv) do {         \
+                char defrag_path[PATH_MAX];                             \
+                GLUSTERD_GET_DEFRAG_DIR(defrag_path, volinfo, priv);    \
+                snprintf (path, PATH_MAX, "%s/%s.sock", defrag_path,    \
+                           uuid_utoa(priv->uuid));                      \
+        } while (0)
+
+#define GLUSTERD_GET_DEFRAG_PID_FILE(path, volinfo, priv) do {          \
+                char defrag_path[PATH_MAX];                             \
+                GLUSTERD_GET_DEFRAG_DIR(defrag_path, volinfo, priv);    \
+                snprintf (path, PATH_MAX, "%s/%s.pid", defrag_path,     \
+                           uuid_utoa(priv->uuid));                      \
+        } while (0)
+
 
 int32_t
 glusterd_brick_from_brickinfo (glusterd_brickinfo_t *brickinfo,
@@ -522,8 +568,8 @@ glusterd_brick_rpc_notify (struct rpc_clnt *rpc, void *mydata,
                           rpc_clnt_event_t event, void *data);
 
 int
-glusterd_shd_rpc_notify (struct rpc_clnt *rpc, void *mydata,
-                          rpc_clnt_event_t event, void *data);
+glusterd_nodesvc_rpc_notify (struct rpc_clnt *rpc, void *mydata,
+                             rpc_clnt_event_t event, void *data);
 
 int
 glusterd_rpc_create (struct rpc_clnt **rpc, dict_t *options,
@@ -536,10 +582,17 @@ int32_t glusterd_op_begin (rpcsvc_request_t *req, glusterd_op_t op, void *ctx);
 /* removed other definitions as they have been defined elsewhere in this file*/
 
 int glusterd_handle_cli_statedump_volume (rpcsvc_request_t *req);
+int glusterd_handle_cli_clearlocks_volume (rpcsvc_request_t *req);
 
 int glusterd_handle_defrag_start (glusterd_volinfo_t *volinfo, char *op_errstr,
                                   size_t len, int cmd, defrag_cbk_fn_t cbk);
+int
+glusterd_rebalance_rpc_create (glusterd_volinfo_t *volinfo,
+                               glusterd_conf_t *priv, int cmd);
+
 int glusterd_handle_cli_heal_volume (rpcsvc_request_t *req);
+
+int glusterd_handle_cli_list_volume (rpcsvc_request_t *req);
 
 /* op-sm functions */
 int glusterd_op_stage_heal_volume (dict_t *dict, char **op_errstr);
@@ -573,6 +626,9 @@ int glusterd_op_rebalance (dict_t *dict, char **op_errstr, dict_t *rsp_dict);
 int glusterd_op_stage_statedump_volume (dict_t *dict, char **op_errstr);
 int glusterd_op_statedump_volume (dict_t *dict, char **op_errstr);
 
+int glusterd_op_stage_clearlocks_volume (dict_t *dict, char **op_errstr);
+int glusterd_op_clearlocks_volume (dict_t *dict, char **op_errstr);
+
 /* misc */
 void glusterd_do_replace_brick (void *data);
 int glusterd_op_perform_remove_brick (glusterd_volinfo_t  *volinfo, char *brick,
@@ -581,4 +637,11 @@ int glusterd_op_stop_volume_args_get (dict_t *dict, char** volname, int *flags);
 int glusterd_op_statedump_volume_args_get (dict_t *dict, char **volname,
                                            char **options, int *option_cnt);
 
+int glusterd_op_gsync_args_get (dict_t *dict, char **op_errstr,
+                                char **master, char **slave);
+/* Synctask part */
+int32_t glusterd_op_begin_synctask (rpcsvc_request_t *req, glusterd_op_t op,
+                                    void *dict);
+int32_t
+glusterd_defrag_event_notify_handle (dict_t *dict);
 #endif

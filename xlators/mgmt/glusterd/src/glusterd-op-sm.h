@@ -154,8 +154,16 @@ typedef struct glusterd_pr_brick_rsp_conv_t {
         dict_t *dict;
 } glusterd_pr_brick_rsp_conv_t;
 
+typedef struct glusterd_heal_rsp_conv_ {
+        dict_t *dict;
+        glusterd_volinfo_t *volinfo;
+        xlator_t *this;
+} glusterd_heal_rsp_conv_t;
+
 typedef struct glusterd_status_rsp_conv_ {
         int count;
+        int brick_index_max;
+        int other_count;
         dict_t *dict;
 } glusterd_status_rsp_conv_t;
 
@@ -183,7 +191,7 @@ int32_t
 glusterd_op_set_op (glusterd_op_t op);
 
 int
-glusterd_op_build_payload (dict_t **req);
+glusterd_op_build_payload (dict_t **req, char **op_errstr);
 
 int32_t
 glusterd_op_stage_validate (glusterd_op_t op, dict_t *req, char **op_errstr,
@@ -218,9 +226,6 @@ glusterd_check_option_exists(char *optstring, char **completion);
 int
 set_xlator_option (dict_t *dict, char *key, char *value);
 
-char *
-glusterd_check_brick_rb_part (char *bricks, int count, glusterd_volinfo_t *volinfo);
-
 void
 glusterd_do_replace_brick (void *data);
 int
@@ -236,10 +241,13 @@ glusterd_op_bricks_select (glusterd_op_t op, dict_t *dict, char **op_errstr);
 int
 glusterd_brick_op_build_payload (glusterd_op_t op, glusterd_brickinfo_t *brickinfo,
                                  gd1_mgmt_brick_op_req **req, dict_t *dict);
+int
+glusterd_node_op_build_payload (glusterd_op_t op, gd1_mgmt_brick_op_req **req,
+                               dict_t *dict);
 int32_t
-glusterd_handle_brick_rsp (glusterd_brickinfo_t *brickinfo,
-                           glusterd_op_t op, dict_t *rsp_dict, dict_t *ctx_dict,
-                           char **op_errstr);
+glusterd_handle_brick_rsp (void *pending_entry, glusterd_op_t op,
+                           dict_t *rsp_dict, dict_t *ctx_dict, char **op_errstr,
+                           gd_node_type type);
 int32_t
 glusterd_op_init_ctx (glusterd_op_t op);
 int32_t
@@ -269,4 +277,8 @@ glusterd_gsync_get_param_file (char *prmfile, const char *ext, char *master,
                                 char *slave, char *gl_workdir);
 int
 glusterd_check_gsync_running (glusterd_volinfo_t *volinfo, gf_boolean_t *flag);
+
+int
+glusterd_defrag_volume_node_rsp (dict_t *req_dict, dict_t *rsp_dict,
+                                 dict_t *op_ctx);
 #endif

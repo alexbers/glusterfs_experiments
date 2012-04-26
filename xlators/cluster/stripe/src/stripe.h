@@ -38,36 +38,53 @@
 #include <signal.h>
 
 #define STRIPE_PATHINFO_HEADER "STRIPE:"
-
+#define STRIPE_MIN_BLOCK_SIZE  (16*GF_UNIT_KB)
 
 #define STRIPE_STACK_UNWIND(fop, frame, params ...) do {           \
                 stripe_local_t *__local = NULL;                    \
-                if (frame) {                                    \
-                        __local = frame->local;                 \
-                        frame->local = NULL;                    \
-                }                                               \
-                STACK_UNWIND_STRICT (fop, frame, params);       \
+                if (frame) {                                       \
+                        __local = frame->local;                    \
+                        frame->local = NULL;                       \
+                }                                                  \
+                STACK_UNWIND_STRICT (fop, frame, params);          \
+                if (__local) {                                     \
+                        stripe_local_wipe(__local);                \
+                        mem_put (__local);       \
+                }                                                  \
+        } while (0)
+
+#define STRIPE_STACK_DESTROY(frame) do {                        \
+                stripe_local_t *__local = NULL;                 \
+                __local = frame->local;                         \
+                frame->local = NULL;                            \
+                STACK_DESTROY (frame->root);                    \
                 if (__local) {                                  \
-                        stripe_local_wipe(__local);             \
-                        GF_FREE (__local);                      \
+                        stripe_local_wipe (__local);            \
+                        mem_put (__local);    \
                 }                                               \
         } while (0)
 
-#define STRIPE_STACK_DESTROY(frame) do {                  \
-                stripe_local_t *__local = NULL;           \
-                __local = frame->local;                   \
-                frame->local = NULL;                      \
-                STACK_DESTROY (frame->root);              \
-                if (__local) {                            \
-                        stripe_local_wipe (__local);      \
-                        GF_FREE (__local);                \
-                }                                         \
-        } while (0)
+#define STRIPE_VALIDATE_FCTX(fctx, label) do {                  \
+        int     idx = 0;                                        \
+        if (!fctx) {                                            \
+                op_errno = EINVAL;                              \
+                goto label;                                     \
+        }                                                       \
+        for (idx = 0; idx < fctx->stripe_count; idx++) {        \
+                if (!fctx->xl_array[idx]) {                     \
+                        gf_log (this->name, GF_LOG_ERROR,       \
+                                "fctx->xl_array[%d] is NULL",   \
+                                idx);                           \
+                        op_errno = ESTALE;                      \
+                        goto label;                             \
+                }                                               \
+        }                                                       \
+       } while (0)
 
 typedef struct stripe_xattr_sort {
         int32_t  pos;
-        int32_t  pathinfo_len;
-        char    *pathinfo;
+        int32_t  xattr_len;
+        char    *xattr_value;
 } stripe_xattr_sort_t;
 
 /**
@@ -173,11 +190,12 @@ struct stripe_local {
         mode_t               mode;
         dev_t                rdev;
         /* For File I/O fops */
-        dict_t              *dict;
+        dict_t              *xdata;
 
         stripe_xattr_sort_t *xattr_list;
         int32_t              xattr_total_len;
         int32_t              nallocs;
+        char xsel[256];
 
         struct marker_str    marker;
 
@@ -194,12 +212,31 @@ struct stripe_local {
         void                *value;
         struct iobref       *iobref;
         gf_dirent_t          entries;
+        gf_dirent_t         *dirent;
         dict_t              *xattr;
         uuid_t               ia_gfid;
+
+        int                  xflag;
+        mode_t               umask;
 };
 
 typedef struct stripe_local   stripe_local_t;
 typedef struct stripe_private stripe_private_t;
 
+void stripe_local_wipe (stripe_local_t *local);
+int32_t stripe_ctx_handle (xlator_t *this, call_frame_t *prev,
+                           stripe_local_t *local, dict_t *dict);
+void stripe_aggregate_xattr (dict_t *dst, dict_t *src);
+int32_t stripe_xattr_request_build (xlator_t *this, dict_t *dict,
+                                    uint64_t stripe_size, uint32_t stripe_count,
+                                    uint32_t stripe_index);
+int32_t stripe_get_matching_bs (const char *path, stripe_private_t *priv);
+int set_stripe_block_size (xlator_t *this, stripe_private_t *priv, char *data);
+int32_t stripe_iatt_merge (struct iatt *from, struct iatt *to);
+int32_t stripe_fill_pathinfo_xattr (xlator_t *this, stripe_local_t *local,
+                                    char **xattr_serz);
+int32_t stripe_free_xattr_str (stripe_local_t *local);
+int32_t stripe_xattr_aggregate (char *buffer, stripe_local_t *local,
+                                int32_t *total);
 
 #endif /* _STRIPE_H_ */

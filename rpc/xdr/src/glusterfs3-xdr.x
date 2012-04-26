@@ -45,7 +45,6 @@ struct gf_iatt {
 
 struct gfs3_stat_req {
         opaque gfid[16];
-        string         path<>;     /* NULL terminated */
         opaque   xdata<>; /* Extra data */
 };
 struct gfs3_stat_rsp {
@@ -59,7 +58,6 @@ struct gfs3_stat_rsp {
 struct gfs3_readlink_req {
         opaque gfid[16];
 	unsigned int   size;
-	string         path<>;     /* NULL terminated */
         opaque   xdata<>; /* Extra data */
 }  ;
  struct gfs3_readlink_rsp {
@@ -75,9 +73,8 @@ struct gfs3_readlink_req {
         opaque  pargfid[16];
 	unsigned hyper dev;
 	unsigned int mode;
-	string     path<>;     /* NULL terminated */
+        unsigned int umask;
 	string     bname<>; /* NULL terminated */
-        opaque     dict<>;
         opaque   xdata<>; /* Extra data */
 } ;
  struct gfs3_mknod_rsp {
@@ -93,10 +90,9 @@ struct gfs3_readlink_req {
  struct  gfs3_mkdir_req {
         opaque  pargfid[16];
 	unsigned int mode;
-	string     path<>;     /* NULL terminated */
+        unsigned int umask;
 	string     bname<>; /* NULL terminated */
-        opaque     dict<>;
-        opaque   xdata<>; /* Extra data */
+        opaque     xdata<>; /* Extra data */
 } ;
  struct  gfs3_mkdir_rsp {
         int    op_ret;
@@ -110,8 +106,8 @@ struct gfs3_readlink_req {
 
  struct   gfs3_unlink_req {
         opaque  pargfid[16];
-	string     path<>;     /* NULL terminated */
 	string     bname<>; /* NULL terminated */
+        unsigned int xflags;
         opaque   xdata<>; /* Extra data */
 };
  struct   gfs3_unlink_rsp {
@@ -125,10 +121,9 @@ struct gfs3_readlink_req {
 
  struct   gfs3_rmdir_req {
         opaque  pargfid[16];
-        int        flags;
-	string     path<>;
+        int        xflags;
 	string     bname<>; /* NULL terminated */
-        opaque   xdata<>; /* Extra data */
+        opaque     xdata<>; /* Extra data */
 };
  struct   gfs3_rmdir_rsp {
         int    op_ret;
@@ -141,10 +136,9 @@ struct gfs3_readlink_req {
 
  struct   gfs3_symlink_req {
         opaque  pargfid[16];
-	string     path<>;
 	string     bname<>;
+        unsigned int umask;
 	string     linkname<>;
-        opaque     dict<>;
         opaque   xdata<>; /* Extra data */
 };
  struct  gfs3_symlink_rsp {
@@ -160,9 +154,7 @@ struct gfs3_readlink_req {
  struct   gfs3_rename_req {
         opaque  oldgfid[16];
         opaque  newgfid[16];
-	string       oldpath<>;
 	string       oldbname<>; /* NULL terminated */
-	string       newpath<>;
 	string       newbname<>; /* NULL terminated */
         opaque   xdata<>; /* Extra data */
 };
@@ -181,8 +173,6 @@ struct gfs3_readlink_req {
  struct  gfs3_link_req {
         opaque  oldgfid[16];
         opaque  newgfid[16];
-	string       oldpath<>;
-	string       newpath<>;
 	string       newbname<>;
         opaque   xdata<>; /* Extra data */
 };
@@ -198,7 +188,6 @@ struct gfs3_readlink_req {
  struct   gfs3_truncate_req {
         opaque gfid[16];
 	unsigned hyper offset;
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 };
  struct   gfs3_truncate_rsp {
@@ -213,8 +202,6 @@ struct gfs3_readlink_req {
  struct   gfs3_open_req {
         opaque gfid[16];
 	unsigned int flags;
-        unsigned int wbflags;
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 };
  struct   gfs3_open_rsp {
@@ -230,6 +217,7 @@ struct gfs3_readlink_req {
 	hyper  fd;
 	unsigned hyper offset;
 	unsigned int size;
+        unsigned int flag;
         opaque   xdata<>; /* Extra data */
 };
  struct  gfs3_read_rsp {
@@ -244,9 +232,7 @@ struct   gfs3_lookup_req {
         opaque gfid[16];
         opaque  pargfid[16];
 	unsigned int flags;
-	string     path<>;
 	string     bname<>;
-        opaque     dict<>;
         opaque   xdata<>; /* Extra data */
 };
  struct   gfs3_lookup_rsp {
@@ -254,7 +240,6 @@ struct   gfs3_lookup_req {
         int    op_errno;
 	struct gf_iatt stat;
         struct gf_iatt postparent;
-	opaque             dict<>;
         opaque   xdata<>; /* Extra data */
 } ;
 
@@ -265,6 +250,7 @@ struct   gfs3_lookup_req {
 	hyper  fd;
 	unsigned hyper offset;
 	unsigned int size;
+        unsigned int flag;
         opaque   xdata<>; /* Extra data */
 };
  struct gfs3_write_rsp {
@@ -278,7 +264,6 @@ struct   gfs3_lookup_req {
 
  struct gfs3_statfs_req  {
         opaque gfid[16];
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 }  ;
  struct gfs3_statfs_rsp {
@@ -308,7 +293,6 @@ struct   gfs3_lookup_req {
 	unsigned int cmd;
 	unsigned int type;
 	struct gf_proto_flock flock;
-	string     path<>;
         string     volume<>;
         opaque   xdata<>; /* Extra data */
 }  ;
@@ -350,7 +334,6 @@ struct   gfs3_finodelk_req {
         opaque gfid[16];
 	unsigned int flags;
         opaque     dict<>;
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 }  ;
 
@@ -370,7 +353,6 @@ struct   gfs3_finodelk_req {
         opaque gfid[16];
 	unsigned int flags;
         opaque     dict<>;
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 }  ;
 
@@ -401,7 +383,6 @@ struct   gfs3_finodelk_req {
  struct gfs3_getxattr_req  {
         opaque gfid[16];
 	unsigned int namelen;
-	string     path<>;
 	string     name<>;
         opaque   xdata<>; /* Extra data */
 }  ;
@@ -430,7 +411,6 @@ struct   gfs3_finodelk_req {
 
  struct gfs3_removexattr_req {
         opaque gfid[16];
-	string     path<>;
 	string     name<>;
         opaque   xdata<>; /* Extra data */
 }  ;
@@ -446,7 +426,6 @@ struct   gfs3_finodelk_req {
 
  struct gfs3_opendir_req {
         opaque gfid[16];
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 }  ;
  struct gfs3_opendir_rsp {
@@ -493,7 +472,6 @@ struct   gfs3_finodelk_req {
 struct gfs3_access_req  {
         opaque gfid[16];
 	unsigned int mask;
-	string     path<>;
         opaque   xdata<>; /* Extra data */
 } ;
 
@@ -502,9 +480,8 @@ struct gfs3_create_req {
         opaque  pargfid[16];
 	unsigned int flags;
 	unsigned int mode;
-	string     path<>;
+	unsigned int umask;
 	string     bname<>;
-        opaque     dict<>;
         opaque   xdata<>; /* Extra data */
 }  ;
 struct  gfs3_create_rsp {
@@ -553,7 +530,6 @@ struct gfs3_fstat_req {
 	unsigned int  cmd;
 	unsigned int  type;
 	unsigned hyper  namelen;
-	string      path<>;
 	string      name<>;
         string      volume<>;
         opaque   xdata<>; /* Extra data */
@@ -575,7 +551,6 @@ struct gfs3_fstat_req {
         opaque gfid[16];
         struct gf_iatt stbuf;
         int        valid;
-        string           path<>;
         opaque   xdata<>; /* Extra data */
 }  ;
  struct gfs3_setattr_rsp {
@@ -698,3 +673,24 @@ struct gfs3_readdirp_rsp {
         opaque   xdata<>; /* Extra data */
 };
 
+struct gf_set_lk_ver_rsp {
+       int op_ret;
+       int op_errno;
+       int lk_ver;
+};
+
+struct gf_set_lk_ver_req {
+       string uid<>;
+       int lk_ver;
+};
+
+struct gf_event_notify_req {
+	int op;
+	opaque dict<>;
+};
+
+struct gf_event_notify_rsp {
+	int op_ret;
+	int op_errno;
+	opaque dict<>;
+};

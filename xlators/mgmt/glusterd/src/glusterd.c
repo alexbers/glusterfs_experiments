@@ -44,9 +44,12 @@
 #include "glusterd-sm.h"
 #include "glusterd-op-sm.h"
 #include "glusterd-store.h"
+#include "glusterd-hooks.h"
 #include "glusterd-utils.h"
 #include "common-utils.h"
 #include "run.h"
+
+#include "syncop.h"
 
 #include "glusterd-mountbroker.h"
 
@@ -243,7 +246,7 @@ out:
         return ret;
 }
 
-/* defined in usterd-utils.c -- no
+/* defined in glusterd-utils.c -- no
  * glusterd header where it would be
  * appropriate to put to, and too
  * accidental routine to place in
@@ -647,9 +650,12 @@ check_prepare_mountbroker_root (char *mountbroker_root)
         ret = 0;
 
  out:
-        close (dfd0);
-        close (dfd);
-        close (dfd2);
+        if (dfd0 != -1)
+                close (dfd0);
+        if (dfd != -1)
+                close (dfd);
+        if (dfd2 != -1)
+                close (dfd2);
 
         return ret;
 }
@@ -679,10 +685,11 @@ _install_mount_spec (dict_t *opts, char *key, data_t *value, void *data)
                 label = strtail (key, "mountbroker-"GEOREP".");
                 if (label)
                         georep = _gf_true;
-
-                label = strtail (key, "mountbroker-"GHADOOP".");
-                if (label)
-                        ghadoop = _gf_true;
+                else {
+                        label = strtail (key, "mountbroker-"GHADOOP".");
+                        if (label)
+                                ghadoop = _gf_true;
+                }
         }
 
         if (!label)
@@ -752,6 +759,7 @@ init (xlator_t *this)
         char               voldir [PATH_MAX] = {0,};
         char               dirname [PATH_MAX];
         char               cmd_log_filename [PATH_MAX] = {0,};
+        char               hooks_dir [PATH_MAX] = {0,};
         int                first_time        = 0;
         char              *mountbroker_root  = NULL;
 
@@ -792,6 +800,7 @@ init (xlator_t *this)
                                 " ,errno = %d", dirname, errno);
                         exit (1);
                 }
+
                 first_time = 1;
         }
 
@@ -860,7 +869,7 @@ init (xlator_t *this)
         ret = glusterd_rpcsvc_options_build (this->options);
         if (ret)
                 goto out;
-        rpc = rpcsvc_init (this, this->ctx, this->options);
+        rpc = rpcsvc_init (this, this->ctx, this->options, 64);
         if (rpc == NULL) {
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to init rpc");
@@ -927,6 +936,9 @@ init (xlator_t *this)
         conf->shd = GF_CALLOC (1, sizeof (nodesrv_t),
                                gf_gld_mt_nodesrv_t);
         GF_VALIDATE_OR_GOTO(this->name, conf->shd, out);
+        conf->nfs = GF_CALLOC (1, sizeof (nodesrv_t),
+                               gf_gld_mt_nodesrv_t);
+        GF_VALIDATE_OR_GOTO(this->name, conf->nfs, out);
 
         INIT_LIST_HEAD (&conf->peers);
         INIT_LIST_HEAD (&conf->volumes);
@@ -950,25 +962,36 @@ init (xlator_t *this)
         /* Set option to run bricks on valgrind if enabled in glusterd.vol */
 #ifdef DEBUG
         conf->valgrind = _gf_false;
-        ret = dict_get_str (this->options, "brick-with-valgrind", &valgrind_str);
+        ret = dict_get_str (this->options, "run-with-valgrind", &valgrind_str);
         if (ret < 0) {
-                gf_log (THIS->name, GF_LOG_ERROR,
-                        "cannot get brick-with-valgrind value");
+                gf_log (this->name, GF_LOG_DEBUG,
+                        "cannot get run-with-valgrind value");
         }
         if (valgrind_str) {
                 if (gf_string2boolean (valgrind_str, &(conf->valgrind))) {
-                        gf_log (THIS->name, GF_LOG_WARNING,
-                                "brick-with-valgrind value not a boolean string");
+                        gf_log (this->name, GF_LOG_WARNING,
+                                "run-with-valgrind value not a boolean string");
                 }
         }
 #endif
+
         this->private = conf;
-        (void) glusterd_shd_set_running (_gf_false);
+        (void) glusterd_nodesvc_set_running ("glustershd", _gf_false);
         /* this->ctx->top = this;*/
 
         ret = glusterd_uuid_init (first_time);
         if (ret < 0)
                 goto out;
+
+        GLUSTERD_GET_HOOKS_DIR (hooks_dir, GLUSTERD_HOOK_VER, conf);
+        if (stat (hooks_dir, &buf)) {
+                ret = glusterd_hooks_create_hooks_directory (dirname);
+                if (-1 == ret) {
+                        gf_log (this->name, GF_LOG_CRITICAL,
+                                "Unable to create hooks directory ");
+                        exit (1);
+                }
+        }
 
         INIT_LIST_HEAD (&conf->mount_specs);
         dict_foreach (this->options, _install_mount_spec, &ret);
@@ -999,6 +1022,8 @@ init (xlator_t *this)
         ret = glusterd_restart_gsyncds (conf);
         if (ret)
                 goto out;
+
+        glusterd_restart_rebalance (conf);
         ret = 0;
 out:
         if (ret < 0) {
@@ -1124,8 +1149,10 @@ struct volume_options options[] = {
         { .key = {GEOREP"-log-group"},
           .type = GF_OPTION_TYPE_ANY,
         },
-        { .key = {"brick-with-valgrind"},
+#ifdef DEBUG
+        { .key = {"run-with-valgrind"},
           .type = GF_OPTION_TYPE_BOOL,
         },
+#endif
         { .key   = {NULL} },
 };

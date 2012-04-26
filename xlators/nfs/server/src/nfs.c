@@ -40,6 +40,7 @@
 #include "nfs3.h"
 #include "nfs-mem-types.h"
 #include "nfs3-helpers.h"
+#include "nlm4.h"
 
 /* Every NFS version must call this function with the init function
  * for its particular version.
@@ -170,6 +171,15 @@ nfs_add_all_initiators (struct nfs_state *nfs)
                 gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add protocol"
                         " initializer");
                 goto ret;
+        }
+
+        if (nfs->enable_nlm == _gf_true) {
+                ret = nfs_add_initer (&nfs->versions, nlm4svc_init);
+                if (ret == -1) {
+                        gf_log (GF_NFS, GF_LOG_ERROR, "Failed to add protocol"
+                                " initializer");
+                        goto ret;
+                }
         }
 
         ret = 0;
@@ -500,6 +510,7 @@ nfs_init_state (xlator_t *this)
         unsigned int            fopspoolsize = 0;
         char                    *optstr = NULL;
         gf_boolean_t            boolt = _gf_false;
+        struct stat             stbuf = {0,};
 
         if (!this)
                 return NULL;
@@ -560,6 +571,22 @@ nfs_init_state (xlator_t *this)
 
                 if (boolt == _gf_true)
                         nfs->dynamicvolumes = GF_NFS_DVM_ON;
+        }
+
+        nfs->enable_nlm = _gf_true;
+        if (!dict_get_str (this->options, "nfs.nlm", &optstr)) {
+
+                ret = gf_string2boolean (optstr, &boolt);
+                if (ret < 0) {
+                        gf_log (GF_NFS, GF_LOG_ERROR, "Failed to parse"
+                                " bool string");
+                        goto free_foppool;
+                }
+
+                if (boolt == _gf_false) {
+                        gf_log (GF_NFS, GF_LOG_INFO, "NLM is manually disabled");
+                        nfs->enable_nlm = _gf_false;
+                }
         }
 
         nfs->enable_ino32 = 0;
@@ -684,7 +711,13 @@ nfs_init_state (xlator_t *this)
                 }
         }
 
-        nfs->rpcsvc =  rpcsvc_init (this, this->ctx, this->options);
+        if (stat("/sbin/rpc.statd", &stbuf) == -1) {
+                gf_log (GF_NFS, GF_LOG_WARNING, "/sbin/rpc.statd not found. "
+                        "Disabling NLM");
+                nfs->enable_nlm = _gf_false;
+        }
+
+        nfs->rpcsvc =  rpcsvc_init (this, this->ctx, this->options, 0);
         if (!nfs->rpcsvc) {
                 ret = -1;
                 gf_log (GF_NFS, GF_LOG_ERROR, "RPC service init failed");
@@ -743,6 +776,13 @@ init (xlator_t *this) {
         ret = mount_init_state (this);
         if (ret == -1) {
                 gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init Mount"
+                        "state");
+                goto err;
+        }
+
+        ret = nlm4_init_state (this);
+        if (ret == -1) {
+                gf_log (GF_NFS, GF_LOG_CRITICAL, "Failed to init NLM"
                         "state");
                 goto err;
         }
@@ -812,11 +852,100 @@ nfs_forget (xlator_t *this, inode_t *inode)
         return 0;
 }
 
+gf_boolean_t
+_nfs_export_is_for_vol (char *exname, char *volname)
+{
+        gf_boolean_t    ret = _gf_false;
+        char            *tmp = NULL;
+
+        tmp = exname;
+        if (tmp[0] == '/')
+                tmp++;
+
+        if (!strcmp (tmp, volname))
+                ret = _gf_true;
+
+        return ret;
+}
+
+int
+nfs_priv_to_dict (xlator_t *this, dict_t *dict)
+{
+        int                     ret = -1;
+        struct nfs_state        *priv = NULL;
+        struct mountentry       *mentry = NULL;
+        char                    *volname = NULL;
+        char                    key[1024] = {0,};
+        int                     count = 0;
+
+        GF_VALIDATE_OR_GOTO (THIS->name, this, out);
+        GF_VALIDATE_OR_GOTO (THIS->name, dict, out);
+
+        priv = this->private;
+        GF_ASSERT (priv);
+
+        ret = dict_get_str (dict, "volname", &volname);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "Could not get volname");
+                goto out;
+        }
+
+        list_for_each_entry (mentry, &priv->mstate->mountlist, mlist) {
+                if (!_nfs_export_is_for_vol (mentry->exname, volname))
+                        continue;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "client%d.hostname", count);
+                ret = dict_set_str (dict, key, mentry->hostname);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Error writing hostname to dict");
+                        goto out;
+                }
+
+                /* No connection data available yet in nfs server.
+                 * Hence, setting to 0 to prevent cli failing
+                 */
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "client%d.bytesread", count);
+                ret = dict_set_uint64 (dict, key, 0);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Error writing bytes read to dict");
+                        goto out;
+                }
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "client%d.byteswrite", count);
+                ret = dict_set_uint64 (dict, key, 0);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Error writing bytes write to dict");
+                        goto out;
+                }
+
+                count++;
+        }
+
+        ret = dict_set_int32 (dict, "clientcount", count);
+        if (ret)
+                gf_log (this->name, GF_LOG_ERROR,
+                        "Error writing client count to dict");
+
+out:
+        gf_log (THIS->name, GF_LOG_DEBUG, "Returning %d", ret);
+        return ret;
+}
+
 struct xlator_cbks cbks = {
         .forget      = nfs_forget,
 };
 
 struct xlator_fops fops = { };
+
+struct xlator_dumpops dumpops = {
+        .priv_to_dict   = nfs_priv_to_dict,
+};
 
 /* TODO: If needed, per-volume options below can be extended to be export
 + * specific also because after export-dir is introduced, a volume is not
@@ -828,13 +957,13 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_SIZET,
           .description = "Size in which the client should issue read requests"
                          " to the Gluster NFSv3 server. Must be a multiple of"
-                         " 4KiB."
+                         " 4KB."
         },
         { .key  = {"nfs3.write-size"},
           .type = GF_OPTION_TYPE_SIZET,
           .description = "Size in which the client should issue write requests"
                          " to the Gluster NFSv3 server. Must be a multiple of"
-                         " 4KiB."
+                         " 4KB."
         },
         { .key  = {"nfs3.readdir-size"},
           .type = GF_OPTION_TYPE_SIZET,
@@ -912,7 +1041,7 @@ struct volume_options options[] = {
         { .key  = {"rpc-auth.auth-unix.*"},
           .type = GF_OPTION_TYPE_BOOL,
           .description = "Disable or enable the AUTH_UNIX authentication type "
-                         "for a particular exported volume over-riding defaults"
+                         "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
                          "always be enabled for better interoperability."
                          "However, can be disabled if needed. Enabled by"
@@ -921,7 +1050,7 @@ struct volume_options options[] = {
         { .key  = {"rpc-auth.auth-unix.*.allow"},
           .type = GF_OPTION_TYPE_STR,
           .description = "Disable or enable the AUTH_UNIX authentication type "
-                         "for a particular exported volume over-riding defaults"
+                         "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_UNIX scheme. Must "
                          "always be enabled for better interoperability."
                          "However, can be disabled if needed. Enabled by"
@@ -930,37 +1059,37 @@ struct volume_options options[] = {
         { .key  = {"rpc-auth.auth-null.*"},
           .type = GF_OPTION_TYPE_BOOL,
           .description = "Disable or enable the AUTH_NULL authentication type "
-                         "for a particular exported volume over-riding defaults"
+                         "for a particular exported volume overriding defaults"
                          " and general setting for AUTH_NULL. Must always be "
                          "enabled. This option is here only to avoid "
                          "unrecognized option warnings."
         },
         { .key  = {"rpc-auth.addr.allow"},
-          .type = GF_OPTION_TYPE_STR,
+          .type = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Allow a comma separated list of addresses and/or"
                          " hostnames to connect to the server. By default, all"
-                         " connections are disallowed. This allows users to "
+                         " connections are allowed. This allows users to "
                          "define a general rule for all exported volumes."
         },
         { .key  = {"rpc-auth.addr.reject"},
-          .type = GF_OPTION_TYPE_STR,
+          .type = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Reject a comma separated list of addresses and/or"
                          " hostnames from connecting to the server. By default,"
-                         " all connections are disallowed. This allows users to"
+                         " all connections are allowed. This allows users to"
                          "define a general rule for all exported volumes."
         },
         { .key  = {"rpc-auth.addr.*.allow"},
-          .type = GF_OPTION_TYPE_STR,
+          .type = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Allow a comma separated list of addresses and/or"
                          " hostnames to connect to the server. By default, all"
-                         " connections are disallowed. This allows users to "
+                         " connections are allowed. This allows users to "
                          "define a rule for a specific exported volume."
         },
         { .key  = {"rpc-auth.addr.*.reject"},
-          .type = GF_OPTION_TYPE_STR,
+          .type = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST,
           .description = "Reject a comma separated list of addresses and/or"
                          " hostnames from connecting to the server. By default,"
-                         " all connections are disallowed. This allows users to"
+                         " all connections are allowed. This allows users to"
                          "define a rule for a specific exported volume."
         },
         { .key  = {"rpc-auth.ports.insecure"},
@@ -974,20 +1103,20 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_BOOL,
           .description = "Allow client connections from unprivileged ports. By "
                          "default only privileged ports are allowed. Use this"
-                         " option to set enable or disable insecure ports for "
-                         "a specific subvolume and to over-ride global setting "
+                         " option to enable or disable insecure ports for "
+                         "a specific subvolume and to override the global setting "
                          " set by the previous option."
         },
         { .key  = {"rpc-auth.addr.namelookup"},
           .type = GF_OPTION_TYPE_BOOL,
-          .description = "Users have the option of turning off name lookup for"
-                  " incoming client connections using this option. In some "
+          .description = "Users have the option of turning on name lookup for"
+                  " incoming client connections using this option. Use this "
+                  "option to turn on name lookups during address-based "
+                  "authentication. Turning this on will enable you to"
+                  " use hostnames in rpc-auth.addr.* filters. In some "
                   "setups, the name server can take too long to reply to DNS "
-                  "queries resulting in timeouts of mount requests. Use this "
-                  "option to turn off name lookups during address "
-                  "authentication. Note, turning this off will prevent you from"
-                  " using hostnames in rpc-auth.addr.* filters. By default, "
-                  " name lookup is on."
+                  "queries resulting in timeouts of mount requests. By default, "
+                  " name lookup is off"
         },
         { .key  = {"nfs.dynamic-volumes"},
           .type = GF_OPTION_TYPE_BOOL,
@@ -1007,8 +1136,8 @@ struct volume_options options[] = {
           .type = GF_OPTION_TYPE_BOOL,
           .description = "For nfs clients or apps that do not support 64-bit "
                          "inode numbers, use this option to make NFS return "
-                         "32-bit inode numbers instead. Disabled by default so "
-                         "NFS returns 64-bit inode numbers by default."
+                         "32-bit inode numbers instead. Disabled by default, so "
+                         "NFS returns 64-bit inode numbers."
         },
         { .key  = {"rpc.register-with-portmap"},
           .type = GF_OPTION_TYPE_BOOL,
@@ -1019,11 +1148,15 @@ struct volume_options options[] = {
         },
         { .key  = {"nfs.port"},
           .type = GF_OPTION_TYPE_INT,
+          .min  = 1,
+          .max  = 0xffff,
           .description = "Use this option on systems that need Gluster NFS to "
                          "be associated with a non-default port number."
         },
         { .key  = {"nfs.mem-factor"},
           .type = GF_OPTION_TYPE_INT,
+          .min  = 1,
+          .max  = 1024,
           .description = "Use this option to make NFS be faster on systems by "
                          "using more memory. This option specifies a multiple "
                          "that determines the total amount of memory used. "
@@ -1037,6 +1170,14 @@ struct volume_options options[] = {
           .description = "This option is used to start or stop NFS server"
                          "for individual volume."
         },
+
+        { .key  = {"nfs.nlm"},
+          .type = GF_OPTION_TYPE_BOOL,
+          .description = "This option, if set to 'off', disables NLM server "
+                         "by not registering the service with the portmapper."
+                         " Set it to 'on' to re-enable it. Default value: 'on'"
+        },
+
         { .key  = {NULL} },
 };
 

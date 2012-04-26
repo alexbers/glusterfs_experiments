@@ -30,9 +30,11 @@
 #include <unistd.h>
 #include "glusterfs.h"
 #include "locking.h"
+#include "fd-lk.h"
 
 struct _inode;
 struct _dict;
+struct fd_lk_ctx;
 
 struct _fd_ctx {
         union {
@@ -50,7 +52,7 @@ struct _fd_ctx {
  * See the comment there to know why.
  */
 struct _fd {
-        pid_t             pid;
+        uint64_t             pid;
 	int32_t           flags;
         int32_t           refcount;
         struct list_head  inode_list;
@@ -59,6 +61,7 @@ struct _fd {
                                    'struct _fd_ctx' array (_ctx).*/
 	struct _fd_ctx   *_ctx;
         int               xl_count; /* Number of xl referred in this fd */
+        struct fd_lk_ctx *lk_ctx;
 };
 typedef struct _fd fd_t;
 
@@ -117,7 +120,15 @@ gf_fd_fdtable_destroy (fdtable_t *fdtable);
 
 
 fd_t *
+__fd_ref (fd_t *fd);
+
+
+fd_t *
 fd_ref (fd_t *fd);
+
+
+fd_t *
+__fd_unref (fd_t *fd);
 
 
 void
@@ -127,10 +138,14 @@ fd_unref (fd_t *fd);
 fd_t *
 fd_create (struct _inode *inode, pid_t pid);
 
+fd_t *
+fd_create_uint64 (struct _inode *inode, uint64_t pid);
 
 fd_t *
 fd_lookup (struct _inode *inode, pid_t pid);
 
+fd_t *
+fd_lookup_uint64 (struct _inode *inode, uint64_t pid);
 
 fd_t *
 fd_anonymous (inode_t *inode);
@@ -147,6 +162,8 @@ fd_list_empty (struct _inode *inode);
 fd_t *
 fd_bind (fd_t *fd);
 
+fd_t *
+__fd_bind (fd_t *fd);
 
 int
 fd_ctx_set (fd_t *fd, xlator_t *xlator, uint64_t value);
@@ -176,5 +193,14 @@ __fd_ref (fd_t *fd);
 
 void
 fd_ctx_dump (fd_t *fd, char *prefix);
+
+fdentry_t *
+gf_fd_fdtable_copy_all_fds (fdtable_t *fdtable, uint32_t *count);
+
+fdentry_t *
+__gf_fd_fdtable_copy_all_fds (fdtable_t *fdtable, uint32_t *count);
+
+void
+gf_fdptr_put (fdtable_t *fdtable, fd_t *fd);
 
 #endif /* _FD_H */

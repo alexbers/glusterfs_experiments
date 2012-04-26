@@ -30,7 +30,8 @@
 #endif /* MALLOC_H */
 
 /* We don't want gf_log in this function because it may cause
-   'deadlock' with statedump */
+   'deadlock' with statedump. This is because statedump happens
+   inside a signal handler and cannot afford to block on a lock.*/
 #ifdef gf_log
 # undef gf_log
 #endif
@@ -305,6 +306,9 @@ gf_proc_dump_mempool_info (glusterfs_ctx_t *ctx)
                                     pool->padded_sizeof_type);
                 gf_proc_dump_write ("alloc-count", "%"PRIu64, pool->alloc_count);
                 gf_proc_dump_write ("max-alloc", "%d", pool->max_alloc);
+
+                gf_proc_dump_write ("pool-misses", "%"PRIu64, pool->pool_misses);
+                gf_proc_dump_write ("max-stdalloc", "%d", pool->max_stdalloc);
         }
 }
 
@@ -356,6 +360,17 @@ gf_proc_dump_mempool_info_to_dict (glusterfs_ctx_t *ctx, dict_t *dict)
                 if (ret)
                         return;
 
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "pool%d.max-stdalloc", count);
+                ret = dict_set_int32 (dict, key, pool->max_stdalloc);
+                if (ret)
+                        return;
+
+                memset (key, 0, sizeof (key));
+                snprintf (key, sizeof (key), "pool%d.pool-misses", count);
+                ret = dict_set_uint64 (dict, key, pool->pool_misses);
+                if (ret)
+                        return;
                 count++;
         }
         ret = dict_set_int32 (dict, "mempool-count", count);
@@ -409,6 +424,10 @@ gf_proc_dump_xlator_info (xlator_t *top)
                 if (trav->dumpops->fd &&
                     GF_PROC_DUMP_IS_XL_OPTION_ENABLED (fd))
                         trav->dumpops->fd (trav);
+
+                if (trav->dumpops->history &&
+                    GF_PROC_DUMP_IS_XL_OPTION_ENABLED (history))
+                        trav->dumpops->history (trav);
 
                 trav = trav->next;
         }
@@ -472,6 +491,8 @@ gf_proc_dump_enable_all_options ()
         GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_inodectx,
                                  _gf_true);
         GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_fdctx, _gf_true);
+        GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_history,
+                                 _gf_true);
 
         return 0;
 }
@@ -490,7 +511,8 @@ gf_proc_dump_disable_all_options ()
         GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_inodectx,
                                  _gf_false);
         GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_fdctx, _gf_false);
-
+        GF_PROC_DUMP_SET_OPTION (dump_options.xl_options.dump_history,
+                                 _gf_false);
         return 0;
 }
 
@@ -502,25 +524,27 @@ gf_proc_dump_parse_set_option (char *key, char *value)
         char buf[GF_DUMP_MAX_BUF_LEN];
         int ret = -1;
 
-        if (!strncasecmp (key, "all", 3)) {
+        if (!strcasecmp (key, "all")) {
                 (void)gf_proc_dump_enable_all_options ();
                 return 0;
-        } else if (!strncasecmp (key, "mem", 3)) {
+        } else if (!strcasecmp (key, "mem")) {
                 opt_key = &dump_options.dump_mem;
-        } else if (!strncasecmp (key, "iobuf", 5)) {
+        } else if (!strcasecmp (key, "iobuf")) {
                 opt_key = &dump_options.dump_iobuf;
-        } else if (!strncasecmp (key, "callpool", 8)) {
+        } else if (!strcasecmp (key, "callpool")) {
                 opt_key = &dump_options.dump_callpool;
-        } else if (!strncasecmp (key, "priv", 4)) {
+        } else if (!strcasecmp (key, "priv")) {
                 opt_key = &dump_options.xl_options.dump_priv;
-        } else if (!strncasecmp (key, "fd", 2)) {
+        } else if (!strcasecmp (key, "fd")) {
                 opt_key = &dump_options.xl_options.dump_fd;
-        } else if (!strncasecmp (key, "inode", 5)) {
+        } else if (!strcasecmp (key, "inode")) {
                 opt_key = &dump_options.xl_options.dump_inode;
-        } else if (!strncasecmp (key, "inodectx", strlen ("inodectx"))) {
+        } else if (!strcasecmp (key, "inodectx")) {
                 opt_key = &dump_options.xl_options.dump_inodectx;
-        } else if (!strncasecmp (key, "fdctx", strlen ("fdctx"))) {
+        } else if (!strcasecmp (key, "fdctx")) {
                 opt_key = &dump_options.xl_options.dump_fdctx;
+        } else if (!strcasecmp (key, "history")) {
+                opt_key = &dump_options.xl_options.dump_history;
         }
 
         if (!opt_key) {
@@ -529,11 +553,9 @@ gf_proc_dump_parse_set_option (char *key, char *value)
                           "matched key : %s\n", key);
                 ret = write (gf_dump_fd, buf, strlen (buf));
 
-                /* warning suppression */
-                if (ret >= 0) {
+                if (ret >= 0)
                         ret = -1;
-                        goto out;
-                }
+                goto out;
 
         }
 
@@ -548,7 +570,7 @@ out:
 }
 
 static int
-gf_proc_dump_options_init (char *dump_name)
+gf_proc_dump_options_init ()
 {
         int     ret = -1;
         FILE    *fp = NULL;
@@ -618,11 +640,11 @@ gf_proc_dump_info (int signum)
         } else
                 strncpy (brick_name, "glusterdump", sizeof (brick_name));
 
-        ret = gf_proc_dump_options_init (brick_name);
+        ret = gf_proc_dump_open (ctx->statedump_path, brick_name);
         if (ret < 0)
                 goto out;
 
-        ret = gf_proc_dump_open (ctx->statedump_path, brick_name);
+        ret = gf_proc_dump_options_init ();
         if (ret < 0)
                 goto out;
 
@@ -657,8 +679,9 @@ gf_proc_dump_info (int signum)
                 i++;
         }
 
-        gf_proc_dump_close ();
 out:
+        if (gf_dump_fd != -1)
+                gf_proc_dump_close ();
         gf_proc_dump_unlock ();
 
         return;

@@ -169,65 +169,6 @@ out:
         return ret;
 }
 
-
-char *
-glusterd_check_brick_rb_part (char *bricks, int count, glusterd_volinfo_t *volinfo)
-{
-        char                                    *saveptr = NULL;
-        char                                    *brick = NULL;
-        char                                    *brick_list = NULL;
-        int                                     ret = 0;
-        glusterd_brickinfo_t                    *brickinfo = NULL;
-        uint32_t                                i = 0;
-        char                                    *str = NULL;
-        char                                    msg[2048] = {0,};
-
-        brick_list = gf_strdup (bricks);
-        if (!brick_list) {
-                gf_log ("glusterd", GF_LOG_ERROR,
-                        "Out of memory");
-                ret = -1;
-                goto out;
-        }
-
-        if (count)
-                brick = strtok_r (brick_list+1, " \n", &saveptr);
-
-
-        while ( i < count) {
-                ret = glusterd_brickinfo_from_brick (brick, &brickinfo);
-                if (ret) {
-                        snprintf (msg, sizeof(msg), "Unable to"
-                                  " get brickinfo");
-                        gf_log ("", GF_LOG_ERROR, "%s", msg);
-                        ret = -1;
-                        goto out;
-                }
-
-                if (glusterd_is_replace_running (volinfo, brickinfo)) {
-                        snprintf (msg, sizeof(msg), "Volume %s: replace brick is running"
-                          " and the brick %s:%s you are trying to add is the destination brick"
-                          " for replace brick", volinfo->volname, brickinfo->hostname, brickinfo->path);
-                        ret = -1;
-                        goto out;
-                }
-
-                glusterd_brickinfo_delete (brickinfo);
-                brickinfo = NULL;
-                brick = strtok_r (NULL, " \n", &saveptr);
-                i++;
-        }
-
-out:
-        if (brick_list)
-                GF_FREE(brick_list);
-        if (brickinfo)
-                glusterd_brickinfo_delete (brickinfo);
-        if (ret)
-                str = gf_strdup (msg);
-        return str;
-}
-
 static int
 glusterd_get_rb_dst_brickinfo (glusterd_volinfo_t *volinfo,
                                glusterd_brickinfo_t **brickinfo)
@@ -463,7 +404,8 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
                 GLUSTERD_GET_BRICK_PIDFILE (pidfile, voldir,
                                             src_brickinfo->hostname,
                                             src_brickinfo->path);
-                if (!glusterd_is_service_running (pidfile, NULL)) {
+                if ((replace_op != GF_REPLACE_OP_COMMIT_FORCE) &&
+                    !glusterd_is_service_running (pidfile, NULL)) {
                         snprintf(msg, sizeof(msg), "Source brick %s:%s "
                                  "is not online.", src_brickinfo->hostname,
                                  src_brickinfo->path);
@@ -500,7 +442,8 @@ glusterd_op_stage_replace_brick (dict_t *dict, char **op_errstr,
         }
 
         if ((volinfo->rb_status ==GF_RB_STATUS_NONE) &&
-            (replace_op == GF_REPLACE_OP_START)) {
+            (replace_op == GF_REPLACE_OP_START ||
+             replace_op == GF_REPLACE_OP_COMMIT_FORCE)) {
                 ret = glusterd_brickinfo_from_brick (dst_brick, &dst_brickinfo);
                 volinfo->src_brick = src_brickinfo;
                 volinfo->dst_brick = dst_brickinfo;
@@ -694,6 +637,8 @@ rb_spawn_dst_brick (glusterd_volinfo_t *volinfo,
                           priv->workdir, volinfo->volname);
         runner_add_arg (&runner, "--xlator-option");
         runner_argprintf (&runner, "src-server.listen-port=%d", port);
+        if (volinfo->memory_accounting)
+                runner_add_arg (&runner, "--mem-accounting");
 
         ret = runner_run (&runner);
         if (ret) {
@@ -730,6 +675,8 @@ rb_spawn_glusterfs_client (glusterd_volinfo_t *volinfo,
                           priv->workdir, volinfo->volname);
         runner_argprintf (&runner, "%s/vols/%s/"RB_CLIENT_MOUNTPOINT,
                           priv->workdir, volinfo->volname);
+        if (volinfo->memory_accounting)
+                runner_add_arg (&runner, "--mem-accounting");
 
         ret = runner_run (&runner);
         if (ret) {
@@ -770,6 +717,8 @@ static const char *client_volfile_str =  "volume mnt-client\n"
         " option remote-subvolume %s\n"
         " option remote-port %d\n"
         " option transport-type %s\n"
+        " option username %s\n"
+        " option password %s\n"
         "end-volume\n"
         "volume mnt-wb\n"
         " type performance/write-behind\n"
@@ -781,23 +730,33 @@ rb_generate_client_volfile (glusterd_volinfo_t *volinfo,
                             glusterd_brickinfo_t *src_brickinfo)
 {
         glusterd_conf_t  *priv                  = NULL;
+        xlator_t         *this                  = NULL;
         FILE             *file                  = NULL;
         char              filename[PATH_MAX]    = {0, };
         int               ret                   = -1;
+        int               fd                    = -1;
         char             *ttype                 = NULL;
 
-        priv = THIS->private;
+        this = THIS;
+        priv = this->private;
 
-        gf_log ("", GF_LOG_DEBUG,
-                "Creating volfile");
+        gf_log (this->name, GF_LOG_DEBUG, "Creating volfile");
 
         snprintf (filename, PATH_MAX, "%s/vols/%s/%s",
                   priv->workdir, volinfo->volname,
                   RB_CLIENTVOL_FILENAME);
 
+        fd = open (filename, O_CREAT | O_RDONLY, S_IRUSR | S_IWUSR);
+        if (fd < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "%s", strerror (errno));
+                goto out;
+        }
+        close (fd);
+
         file = fopen (filename, "w+");
         if (!file) {
-                gf_log ("", GF_LOG_DEBUG,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "Open of volfile failed");
                 ret = -1;
                 goto out;
@@ -812,7 +771,10 @@ rb_generate_client_volfile (glusterd_volinfo_t *volinfo,
 	}
 
         fprintf (file, client_volfile_str, src_brickinfo->hostname,
-                 src_brickinfo->path, src_brickinfo->port, ttype);
+                 src_brickinfo->path,
+                 src_brickinfo->port, ttype,
+                 glusterd_auth_get_username (volinfo),
+                 glusterd_auth_get_password (volinfo));
 
         fclose (file);
         GF_FREE (ttype);
@@ -826,6 +788,7 @@ out:
 static const char *dst_brick_volfile_str = "volume src-posix\n"
         " type storage/posix\n"
         " option directory %s\n"
+        " option volume-id %s\n"
         "end-volume\n"
         "volume %s\n"
         " type features/locks\n"
@@ -833,6 +796,8 @@ static const char *dst_brick_volfile_str = "volume src-posix\n"
         "end-volume\n"
         "volume src-server\n"
         " type protocol/server\n"
+        " option auth.login.%s.allow %s\n"
+        " option auth.login.%s.password %s\n"
         " option auth.addr.%s.allow *\n"
         " option transport-type %s\n"
         " subvolumes %s\n"
@@ -843,23 +808,34 @@ rb_generate_dst_brick_volfile (glusterd_volinfo_t *volinfo,
                                glusterd_brickinfo_t *dst_brickinfo)
 {
         glusterd_conf_t    *priv                = NULL;
+        xlator_t           *this                = NULL;
         FILE               *file                = NULL;
         char                filename[PATH_MAX]  = {0, };
         int                 ret                 = -1;
+        int                 fd                  = -1;
         char               *trans_type          = NULL;
 
-        priv = THIS->private;
+        this = THIS;
+        priv = this->private;
 
-        gf_log ("", GF_LOG_DEBUG,
+        gf_log (this->name, GF_LOG_DEBUG,
                 "Creating volfile");
 
         snprintf (filename, PATH_MAX, "%s/vols/%s/%s",
                   priv->workdir, volinfo->volname,
                   RB_DSTBRICKVOL_FILENAME);
 
+        fd = creat (filename, S_IRUSR | S_IWUSR);
+        if (fd < 0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "%s", strerror (errno));
+                goto out;
+        }
+        close (fd);
+
         file = fopen (filename, "w+");
         if (!file) {
-                gf_log ("", GF_LOG_DEBUG,
+                gf_log (this->name, GF_LOG_DEBUG,
                         "Open of volfile failed");
                 ret = -1;
                 goto out;
@@ -871,9 +847,17 @@ rb_generate_dst_brick_volfile (glusterd_volinfo_t *volinfo,
 		goto out;
 	}
 
-        fprintf (file, dst_brick_volfile_str, dst_brickinfo->path,
-                 dst_brickinfo->path, dst_brickinfo->path,
-                 trans_type, dst_brickinfo->path);
+        fprintf (file, dst_brick_volfile_str,
+                 dst_brickinfo->path,
+                 uuid_utoa (volinfo->volume_id),
+                 dst_brickinfo->path,
+                 dst_brickinfo->path,
+                 glusterd_auth_get_username (volinfo),
+                 glusterd_auth_get_username (volinfo),
+                 glusterd_auth_get_password (volinfo),
+                 dst_brickinfo->path,
+                 trans_type,
+                 dst_brickinfo->path);
 
 	GF_FREE (trans_type);
 
@@ -1512,7 +1496,6 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
 	}
 
         case GF_REPLACE_OP_COMMIT:
-        case GF_REPLACE_OP_COMMIT_FORCE:
         {
                 ctx = glusterd_op_get_ctx ();
                 if (ctx) {
@@ -1525,41 +1508,36 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
                                 goto out;
                         }
                 }
-
+        }
+                /* fall through */
+        case GF_REPLACE_OP_COMMIT_FORCE:
+        {
                 ret = dict_set_int32 (volinfo->dict, "enable-pump", 0);
-                gf_log ("", GF_LOG_DEBUG,
+                gf_log (THIS->name, GF_LOG_DEBUG,
                         "Received commit - will be adding dst brick and "
                         "removing src brick");
 
-                if (!glusterd_is_local_addr (dst_brickinfo->hostname) &&
-                    replace_op != GF_REPLACE_OP_COMMIT_FORCE) {
-                        gf_log ("", GF_LOG_INFO,
+                if (!glusterd_is_local_addr (dst_brickinfo->hostname)) {
+                        gf_log (THIS->name, GF_LOG_DEBUG,
                                 "I AM THE DESTINATION HOST");
                         ret = rb_kill_destination_brick (volinfo, dst_brickinfo);
                         if (ret) {
-                                gf_log ("", GF_LOG_DEBUG,
-                                        "Failed to kill destination brick");
+                                gf_log (THIS->name, GF_LOG_CRITICAL,
+                                        "Unable to cleanup dst brick");
                                 goto out;
                         }
                 }
 
-                if (ret) {
-                        gf_log ("", GF_LOG_CRITICAL,
-                                "Unable to cleanup dst brick");
-                        goto out;
-                }
-
-
                 ret = glusterd_nodesvcs_stop (volinfo);
                 if (ret) {
-                        gf_log ("", GF_LOG_ERROR,
+                        gf_log (THIS->name, GF_LOG_ERROR,
                                 "Unable to stop nfs server, ret: %d", ret);
                 }
 
 		ret = glusterd_op_perform_replace_brick (volinfo, src_brick,
 							 dst_brick);
 		if (ret) {
-			gf_log ("", GF_LOG_CRITICAL, "Unable to add "
+			gf_log (THIS->name, GF_LOG_CRITICAL, "Unable to add "
 				"dst-brick: %s to volume: %s",
 				dst_brick, volinfo->volname);
 		        (void) glusterd_nodesvcs_handle_graph_change (volinfo);
@@ -1570,7 +1548,7 @@ glusterd_op_replace_brick (dict_t *dict, dict_t *rsp_dict)
 
 		ret = glusterd_nodesvcs_handle_graph_change (volinfo);
 		if (ret) {
-                        gf_log ("", GF_LOG_CRITICAL,
+                        gf_log (THIS->name, GF_LOG_CRITICAL,
                                 "Failed to generate nfs volume file");
 		}
 

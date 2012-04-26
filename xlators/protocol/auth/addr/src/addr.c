@@ -28,6 +28,7 @@
 #include <netdb.h>
 #include "authenticate.h"
 #include "dict.h"
+#include "rpc-transport.h"
 
 #define ADDR_DELIMITER " ,"
 #define PRIVILEGED_PORT_CEILING 1024
@@ -35,13 +36,6 @@
 #ifndef AF_INET_SDP
 #define AF_INET_SDP 27
 #endif
-
-/* TODO: duplicate declaration */
-typedef struct peer_info {
-        struct sockaddr_storage sockaddr;
-        socklen_t sockaddr_len;
-        char identifier[UNIX_PATH_MAX];
-}peer_info_t;
 
 auth_result_t
 gf_auth (dict_t *input_params, dict_t *config_params)
@@ -232,14 +226,14 @@ out:
 
 struct volume_options options[] = {
         { .key   = {"auth.addr.*.allow"},
-          .type  = GF_OPTION_TYPE_ANY
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST
         },
         { .key   = {"auth.addr.*.reject"},
-          .type  = GF_OPTION_TYPE_ANY
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST
         },
         /* Backword compatibility */
         { .key   = {"auth.ip.*.allow"},
-          .type  = GF_OPTION_TYPE_ANY
+          .type  = GF_OPTION_TYPE_INTERNET_ADDRESS_LIST
         },
         { .key = {NULL} }
 };

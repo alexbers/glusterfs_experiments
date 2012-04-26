@@ -1,3 +1,21 @@
+/*Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
+
+  GlusterFS is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published
+  by the Free Software Foundation; either version 3 of the License,
+  or (at your option) any later version.
+
+  GlusterFS is distributed in the hope that it will be useful, but
+  WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see
+  <http://www.gnu.org/licenses/>.
+*/
+
 #include "mem-types.h"
 #include "libxlator.h"
 
@@ -35,91 +53,75 @@ match_uuid_local (const char *name, char *uuid)
         return 0;
 }
 
+static void
+marker_local_incr_errcount (xl_marker_local_t *local, int op_errno)
+{
+        if (!local)
+                return;
 
-
+        switch (op_errno) {
+                case ENODATA:
+                        local->enodata_count++;
+                        break;
+                case ENOENT:
+                        local->enoent_count++;
+                        break;
+                case ENOTCONN:
+                        local->enotconn_count++;
+                        break;
+                default:
+                        break;
+        }
+}
 
 /* Aggregate all the <volid>.xtime attrs of the cluster and send the max*/
 int32_t
 cluster_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, dict_t *dict)
+                         int op_ret, int op_errno, dict_t *dict, dict_t *xdata)
 
 {
 
-        int32_t            callcnt         = 0;
-        int                ret             = -1;
-        uint32_t          *net_timebuf     = NULL;
-        uint32_t           host_timebuf[2] = {0,};
-        char              *marker_xattr    = NULL;
-        struct marker_str *local           = NULL;
-        char              *vol_uuid        = NULL;
+        int32_t           callcnt         = 0;
+        int               ret             = -1;
+        uint32_t          *net_timebuf    = NULL;
+        uint32_t          host_timebuf[2] = {0,};
+        char              *marker_xattr   = NULL;
+        xl_marker_local_t *local          = NULL;
+        char              *vol_uuid       = NULL;
+        char              need_unwind     = 0;
 
         if (!this || !frame || !frame->local || !cookie) {
-                gf_log (this->name, GF_LOG_DEBUG, "possible NULL deref");
+                gf_log ("", GF_LOG_DEBUG, "possible NULL deref");
+                need_unwind = 1;
                 goto out;
         }
 
         local = frame->local;
         if (!local || !local->vol_uuid) {
                 gf_log (this->name, GF_LOG_DEBUG, "possible NULL deref");
+                need_unwind = 1;
                 goto out;
         }
-
-        if (local->esomerr) {
-                 LOCK (&frame->lock);
-                {
-                        callcnt = --local->call_count;
-                }
-                goto done;
-        }
-
-        vol_uuid = local->vol_uuid;
-
-        if (op_ret && op_errno == ENODATA) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --local->call_count;
-                        local->enodata_count++;
-                }
-                goto done;
-        }
-
-        if (op_ret && op_errno == ENOENT) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --local->call_count;
-                        local->enoent_count++;
-                }
-                goto done;
-        }
-
-        if (op_ret && op_errno == ENOTCONN) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --local->call_count;
-                        local->enotconn_count++;
-                }
-                goto done;
-        }
-
-        if (op_ret) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --local->call_count;
-                        local->esomerr = op_errno;
-                }
-                goto done;
-        }
-
-
-
 
         LOCK (&frame->lock);
         {
                 callcnt = --local->call_count;
-                if (!gf_asprintf (& marker_xattr, "%s.%s.%s",
+
+                if (local->esomerr)
+                        goto unlock;
+
+                vol_uuid = local->vol_uuid;
+
+                if (op_ret) {
+                        marker_local_incr_errcount (local, op_errno);
+                        local->esomerr = op_errno;
+                        goto unlock;
+                }
+
+                if (!gf_asprintf (&marker_xattr, "%s.%s.%s",
                                 MARKER_XATTR_PREFIX, vol_uuid, XTIME)) {
                         op_errno = ENOMEM;
-                        goto done;
+                        goto unlock;
                 }
 
 
@@ -127,47 +129,37 @@ cluster_markerxtime_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         gf_log (this->name, GF_LOG_WARNING,
                                 "Unable to get <uuid>.xtime attr");
                         local->noxtime_count++;
-                        goto done;
+                        goto unlock;
                 }
 
                 if (local->has_xtime) {
-
                         get_hosttime (net_timebuf, host_timebuf);
                         if ( (host_timebuf[0]>local->host_timebuf[0]) ||
                                 (host_timebuf[0] == local->host_timebuf[0] &&
                                  host_timebuf[1] >= local->host_timebuf[1])) {
-
                                 update_timebuf (net_timebuf, local->net_timebuf);
                                 update_timebuf (host_timebuf, local->host_timebuf);
-
                         }
 
-                }
-                else {
+                } else {
                         get_hosttime (net_timebuf, local->host_timebuf);
                         update_timebuf (net_timebuf, local->net_timebuf);
                         local->has_xtime = _gf_true;
                 }
 
-
-
         }
-done:
+unlock:
         UNLOCK (&frame->lock);
 
         if (!callcnt) {
-
                 op_ret = 0;
                 op_errno = 0;
+                need_unwind = 1;
+
                 if (local->has_xtime) {
-                        if (!dict) {
+                        if (!dict)
                                 dict = dict_new();
-                                if (ret) {
-                                        op_ret = -1;
-                                        op_errno = ENOMEM;
-                                        goto out;
-                                }
-                        }
+
                         ret = dict_set_static_bin (dict, marker_xattr,
                                            (void *)local->net_timebuf, 8);
                         if (ret) {
@@ -175,178 +167,142 @@ done:
                                 op_errno = ENOMEM;
                                 goto out;
                         }
-                        goto out;
                 }
 
                 if (local->noxtime_count)
                         goto out;
 
-                if (local->enodata_count) {
+                if (local->enodata_count || local->enotconn_count ||
+                                              local->enoent_count) {
                         op_ret = -1;
-                        op_errno = ENODATA;
-                        goto out;
+                        op_errno = local->enodata_count? ENODATA:
+                                        local->enotconn_count? ENOTCONN:
+                                        local->enoent_count? ENOENT:
+                                        local->esomerr;
                 }
-                if (local->enotconn_count) {
-                        op_ret = -1;
-                        op_errno = ENOTCONN;
-                        goto out;
-                }
-                if (local->enoent_count) {
-                        op_ret = -1;
-                        op_errno = ENOENT;
-                        goto out;
-                }
-                else {
-                        op_errno = local->esomerr;
-                        goto out;
-                }
-out:
-                if (local->xl_specf_unwind) {
-                        frame->local = local->xl_local;
-                        local->xl_specf_unwind (frame, op_ret,
-                                                 op_errno, dict);
-                        return 0;
-                }
-                STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
-
         }
 
+out:
+        if (need_unwind && local && local->xl_specf_unwind) {
+                frame->local = local->xl_local;
+                local->xl_specf_unwind (frame, op_ret,
+                                        op_errno, dict, xdata);
+        } else if (need_unwind) {
+                STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno,
+                                     dict, xdata);
+        }
+
+        if (marker_xattr)
+                GF_FREE (marker_xattr);
         return 0;
 
 }
 
 int32_t
 cluster_markeruuid_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                        int op_ret, int op_errno, dict_t *dict)
+                        int op_ret, int op_errno, dict_t *dict, dict_t *xdata)
 {
-        int32_t              callcnt = 0;
-        data_t              *data = NULL;
-        struct volume_mark  *volmark = NULL;
-        struct marker_str   *marker = NULL;
-        char                *vol_uuid;
+        int32_t             callcnt     = 0;
+        struct volume_mark  *volmark    = NULL;
+        xl_marker_local_t   *local      = NULL;
+        int32_t             ret         = -1;
+        char                need_unwind = 0;
+        char                *vol_uuid   = NULL;
 
         if (!this || !frame || !cookie) {
-                gf_log (this->name, GF_LOG_DEBUG, "possible NULL deref");
+                gf_log ("", GF_LOG_DEBUG, "possible NULL deref");
+                need_unwind = 1;
                 goto out;
         }
 
-        marker = frame->local;
+        local = frame->local;
 
-        if (!marker) {
+        if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "possible NULL deref");
+                need_unwind = 1;
                 goto out;
         }
-
-        vol_uuid = marker->vol_uuid;
-
-        if (op_ret && (ENOENT == op_errno)) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --marker->call_count;
-                        marker->enoent_count++;
-                }
-                goto done;
-        }
-
-        if (op_ret && (ENOTCONN == op_errno)) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --marker->call_count;
-                        marker->enotconn_count++;
-                }
-                goto done;
-        }
-
-        if (!(data = dict_get (dict, GF_XATTR_MARKER_KEY))) {
-                LOCK (&frame->lock);
-                {
-                        callcnt = --marker->call_count;
-                }
-                goto done;
-        }
-
-        volmark = (struct volume_mark *)data->data;
 
         LOCK (&frame->lock);
         {
-                callcnt = --marker->call_count;
+                callcnt = --local->call_count;
+                vol_uuid = local->vol_uuid;
 
-                if (marker_has_volinfo (marker)) {
+                if (op_ret) {
+                        marker_local_incr_errcount (local, op_errno);
+                        goto unlock;
+                }
 
-                        if ((marker->volmark->major != volmark->major) ||
-                            (marker->volmark->minor != volmark->minor)) {
+                ret = dict_get_bin (dict, GF_XATTR_MARKER_KEY,
+                                    (void *)&volmark);
+                if (ret)
+                        goto unlock;
+
+                if (marker_has_volinfo (local)) {
+                        if ((local->volmark->major != volmark->major) ||
+                            (local->volmark->minor != volmark->minor)) {
                                 op_ret = -1;
                                 op_errno = EINVAL;
-                                goto done;
+                                goto unlock;
                         }
-                        else if (volmark->retval) {
-                                data_unref ((data_t *) marker->volmark);
-                                marker->volmark = volmark;
-                                callcnt = 0;
-                        }
-                        else if ( (volmark->sec > marker->volmark->sec) ||
-                                   ((volmark->sec == marker->volmark->sec)
-                                      && (volmark->usec >= marker->volmark->usec))) {
 
-                                GF_FREE (marker->volmark);
-                                marker->volmark = memdup (volmark, sizeof (struct volume_mark));
-                                VALIDATE_OR_GOTO (marker->volmark, done);
+                        if (local->retval)
+                                goto unlock;
+                        else if (volmark->retval) {
+                                GF_FREE (local->volmark);
+                                local->volmark =
+                                        memdup (volmark, sizeof (*volmark));
+                                local->retval = volmark->retval;
+                        } else if ((volmark->sec > local->volmark->sec) ||
+                                   ((volmark->sec == local->volmark->sec) &&
+                                    (volmark->usec >= local->volmark->usec))) {
+                                GF_FREE (local->volmark);
+                                local->volmark =
+                                      memdup (volmark, sizeof (*volmark));
                         }
 
                 } else {
-                        marker->volmark = memdup (volmark, sizeof (struct volume_mark));
-                        VALIDATE_OR_GOTO (marker->volmark, done);
-
+                        local->volmark = memdup (volmark, sizeof (*volmark));
+                        VALIDATE_OR_GOTO (local->volmark, unlock);
                         uuid_unparse (volmark->uuid, vol_uuid);
                         if (volmark->retval)
-                                callcnt = 0;
+                                local->retval = volmark->retval;
                 }
         }
-done:
+unlock:
         UNLOCK (&frame->lock);
 
         if (!callcnt) {
                 op_ret = 0;
                 op_errno = 0;
-                if (marker_has_volinfo (marker)) {
-                        if (!dict) {
+                need_unwind = 1;
+
+                if (marker_has_volinfo (local)) {
+                        if (!dict)
                                 dict = dict_new();
-                                if (!dict) {
-                                        op_ret = -1;
-                                        op_errno = ENOMEM;
-                                        goto out;
-                                }
-                        }
+
                         if (dict_set_bin (dict, GF_XATTR_MARKER_KEY,
-                                          marker->volmark,
+                                          local->volmark,
                                           sizeof (struct volume_mark))) {
                                 op_ret = -1;
                                 op_errno = ENOMEM;
                         }
-                        goto out;
-                }
-                if (marker->enotconn_count) {
+                } else {
                         op_ret = -1;
-                        op_errno = ENOTCONN;
-                        goto out;
+                        op_errno = local->enotconn_count? ENOTCONN:
+                               local->enoent_count? ENOENT:EINVAL;
                 }
-                if (marker->enoent_count) {
-                        op_ret = -1;
-                        op_errno = ENOENT;
-                }
-                else {
-                        op_ret = -1;
-                        op_errno = EINVAL;
-                }
+        }
 
  out:
-                if (marker->xl_specf_unwind) {
-                        frame->local = marker->xl_local;
-                        marker->xl_specf_unwind (frame, op_ret,
-                                                 op_errno, dict);
-                        return 0;
-                }
-                STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno, dict);
+        if (need_unwind && local && local->xl_specf_unwind) {
+                frame->local = local->xl_local;
+                local->xl_specf_unwind (frame, op_ret,
+                                        op_errno, dict, xdata);
+                return 0;
+        } else if (need_unwind){
+                STACK_UNWIND_STRICT (getxattr, frame, op_ret, op_errno,
+                                     dict, xdata);
         }
         return 0;
 }
@@ -359,8 +315,8 @@ cluster_getmarkerattr (call_frame_t *frame,xlator_t *this, loc_t *loc,
                        xlator_t **sub_volumes, int count, int type,
                        char *vol_uuid)
 {
-        int               i;
-        struct marker_str *local;
+        int                i     = 0;
+        xl_marker_local_t  *local = NULL;
 
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
@@ -373,33 +329,35 @@ cluster_getmarkerattr (call_frame_t *frame,xlator_t *this, loc_t *loc,
         local = GF_CALLOC (sizeof (struct marker_str), 1,
                             gf_common_mt_libxl_marker_local);
 
+        if (!local)
+                goto err;
+
         local->xl_local = xl_local;
-        frame->local = local;
-
         local->call_count = count;
-
         local->xl_specf_unwind = xl_specf_getxattr_unwind;
-
         local->vol_uuid = vol_uuid;
+
+        frame->local = local;
 
         for (i=0; i < count; i++) {
                 if (MARKER_UUID_TYPE == type)
                         STACK_WIND (frame, cluster_markeruuid_cbk,
                                     *(sub_volumes + i),
                                     (*(sub_volumes + i))->fops->getxattr,
-                                    loc, name);
+                                    loc, name, NULL);
                 else if (MARKER_XTIME_TYPE == type)
                         STACK_WIND (frame, cluster_markerxtime_cbk,
                                     *(sub_volumes + i),
                                     (*(sub_volumes + i))->fops->getxattr,
-                                    loc, name);
+                                    loc, name, NULL);
                 else {
                         gf_log (this->name, GF_LOG_WARNING,
-                                 "Unrecognized type of marker attr received");
+                                 "Unrecognized type (%d) of marker attr "
+                                 "received", type);
                         STACK_WIND (frame, default_getxattr_cbk,
                                     *(sub_volumes + i),
                                     (*(sub_volumes + i))->fops->getxattr,
-                                    loc, name);
+                                    loc, name, NULL);
                         break;
                 }
         }

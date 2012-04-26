@@ -40,11 +40,16 @@
 #define ARGP_LOG_LEVEL_CRITICAL_OPTION    "CRITICAL"
 #define ARGP_LOG_LEVEL_ERROR_OPTION       "ERROR"
 #define ARGP_LOG_LEVEL_WARNING_OPTION     "WARNING"
-#define ARGP_LOG_LEVEL_INFO_OPTION      "INFO"
+#define ARGP_LOG_LEVEL_INFO_OPTION        "INFO"
 #define ARGP_LOG_LEVEL_DEBUG_OPTION       "DEBUG"
 
 #define ENABLE_NO_DAEMON_MODE     1
 #define ENABLE_DEBUG_MODE         1
+
+#define GF_MEMPOOL_COUNT_OF_DICT_T        4096
+/* Considering 4 key/value pairs in a dictionary on an average */
+#define GF_MEMPOOL_COUNT_OF_DATA_T        (GF_MEMPOOL_COUNT_OF_DICT_T * 4)
+#define GF_MEMPOOL_COUNT_OF_DATA_PAIR_T   (GF_MEMPOOL_COUNT_OF_DICT_T * 4)
 
 enum argp_option_keys {
         ARGP_VOLFILE_SERVER_KEY           = 's',
@@ -80,13 +85,14 @@ enum argp_option_keys {
         ARGP_ACL_KEY                      = 154,
         ARGP_WORM_KEY                     = 155,
         ARGP_USER_MAP_ROOT_KEY            = 156,
+        ARGP_MEM_ACCOUNTING_KEY           = 157,
 };
 
 struct _gfd_vol_top_priv_t {
         rpcsvc_request_t        *req;
         gd1_mgmt_brick_op_req   xlator_req;
-        int32_t                 blk_count;
-        int32_t                 blk_size;
+        uint32_t                blk_count;
+        uint32_t                blk_size;
         double                  throughput;
         double                  time;
         int32_t                 ret;

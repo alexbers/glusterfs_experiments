@@ -26,7 +26,6 @@
 enum gf_afr_mem_types_ {
         gf_afr_mt_iovec  = gf_common_mt_end + 1,
         gf_afr_mt_afr_fd_ctx_t,
-        gf_afr_mt_afr_local_t,
         gf_afr_mt_afr_private_t,
         gf_afr_mt_int32_t,
         gf_afr_mt_char,
@@ -44,8 +43,13 @@ enum gf_afr_mem_types_ {
         gf_afr_mt_locked_fd,
         gf_afr_mt_inode_ctx_t,
         gf_afr_fd_paused_call_t,
-        gf_afr_mt_afr_crawl_data_t,
-        gf_afr_mt_afr_brick_pos_t,
+        gf_afr_mt_crawl_data_t,
+        gf_afr_mt_brick_pos_t,
+        gf_afr_mt_shd_bool_t,
+        gf_afr_mt_shd_timer_t,
+        gf_afr_mt_shd_event_t,
+        gf_afr_mt_time_t,
+        gf_afr_mt_pos_data_t,
         gf_afr_mt_end
 };
 #endif

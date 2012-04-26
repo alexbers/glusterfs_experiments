@@ -47,31 +47,31 @@
 #include "afr.h"
 #include "afr-transaction.h"
 
-void
-afr_build_parent_loc (loc_t *parent, loc_t *child)
+int
+afr_build_parent_loc (loc_t *parent, loc_t *child, int32_t *op_errno)
 {
-        char *tmp = NULL;
+        int     ret = -1;
+        char    *child_path = NULL;
 
         if (!child->parent) {
-                //this should never be called with root as the child
-                GF_ASSERT (0);
-                loc_copy (parent, child);
-                return;
+                if (op_errno)
+                        *op_errno = EINVAL;
+                goto out;
         }
 
-        tmp = gf_strdup (child->path);
-        parent->path   = gf_strdup (dirname (tmp));
-        GF_FREE (tmp);
-
-        parent->name   = strrchr (parent->path, '/');
-        if (parent->name)
-                parent->name++;
-
+        child_path = gf_strdup (child->path);
+        if (!child_path) {
+                if (op_errno)
+                        *op_errno = ENOMEM;
+                goto out;
+        }
+        parent->path = dirname (child_path);
         parent->inode  = inode_ref (child->parent);
-        parent->parent = inode_parent (parent->inode, 0, NULL);
+        uuid_copy (parent->gfid, child->pargfid);
 
-        if (!uuid_is_null (child->pargfid))
-                uuid_copy (parent->gfid, child->pargfid);
+        ret = 0;
+out:
+        return ret;
 }
 
 /* {{{ create */
@@ -106,7 +106,8 @@ afr_create_unwind (call_frame_t *frame, xlator_t *this)
                                   local->cont.create.fd,
                                   local->cont.create.inode,
                                   unwind_buf, &local->cont.create.preparent,
-                                  &local->cont.create.postparent);
+                                  &local->cont.create.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -117,7 +118,8 @@ int
 afr_create_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno,
                      fd_t *fd, inode_t *inode, struct iatt *buf,
-                     struct iatt *preparent, struct iatt *postparent)
+                     struct iatt *preparent, struct iatt *postparent,
+                     dict_t *xdata)
 {
         afr_local_t     *local = NULL;
         afr_private_t   *priv  = NULL;
@@ -235,8 +237,9 @@ afr_create_wind (call_frame_t *frame, xlator_t *this)
                                            &local->loc,
                                            local->cont.create.flags,
                                            local->cont.create.mode,
+                                           local->umask,
                                            local->cont.create.fd,
-                                           local->cont.create.params);
+                                           local->xdata_req);
                         if (!--call_count)
                                 break;
                 }
@@ -264,7 +267,7 @@ afr_create_done (call_frame_t *frame, xlator_t *this)
 int
 afr_create (call_frame_t *frame, xlator_t *this,
             loc_t *loc, int32_t flags, mode_t mode,
-            fd_t *fd, dict_t *params)
+            mode_t umask, fd_t *fd, dict_t *params)
 {
         afr_private_t  *priv  = NULL;
         afr_local_t    *local = NULL;
@@ -286,7 +289,7 @@ afr_create (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -305,14 +308,18 @@ afr_create (call_frame_t *frame, xlator_t *this,
         local->cont.create.flags = flags;
         local->cont.create.mode  = mode;
         local->cont.create.fd    = fd_ref (fd);
+        local->umask  = umask;
         if (params)
-                local->cont.create.params = dict_ref (params);
+                local->xdata_req = dict_ref (params);
 
         local->transaction.fop    = afr_create_wind;
         local->transaction.done   = afr_create_done;
         local->transaction.unwind = afr_create_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame = frame;
         local->transaction.basename = AFR_BASENAME (loc->path);
@@ -325,7 +332,7 @@ out:
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
                 AFR_STACK_UNWIND (create, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -364,7 +371,8 @@ afr_mknod_unwind (call_frame_t *frame, xlator_t *this)
                                   local->op_ret, local->op_errno,
                                   local->cont.mknod.inode,
                                   unwind_buf, &local->cont.mknod.preparent,
-                                  &local->cont.mknod.postparent);
+                                  &local->cont.mknod.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -375,7 +383,7 @@ int
 afr_mknod_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, inode_t *inode,
                     struct iatt *buf, struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t     *local          = NULL;
         afr_private_t   *priv           = NULL;
@@ -460,7 +468,8 @@ afr_mknod_wind (call_frame_t *frame, xlator_t *this)
                                            priv->children[i]->fops->mknod,
                                            &local->loc, local->cont.mknod.mode,
                                            local->cont.mknod.dev,
-                                           local->cont.mknod.params);
+                                           local->umask,
+                                           local->xdata_req);
                         if (!--call_count)
                                 break;
                 }
@@ -485,8 +494,8 @@ afr_mknod_done (call_frame_t *frame, xlator_t *this)
 
 
 int
-afr_mknod (call_frame_t *frame, xlator_t *this,
-           loc_t *loc, mode_t mode, dev_t dev, dict_t *params)
+afr_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
+           dev_t dev, mode_t umask, dict_t *params)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -508,7 +517,7 @@ afr_mknod (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -526,14 +535,18 @@ afr_mknod (call_frame_t *frame, xlator_t *this,
 
         local->cont.mknod.mode  = mode;
         local->cont.mknod.dev   = dev;
+        local->umask = umask;
         if (params)
-                local->cont.mknod.params = dict_ref (params);
+                local->xdata_req = dict_ref (params);
 
         local->transaction.fop    = afr_mknod_wind;
         local->transaction.done   = afr_mknod_done;
         local->transaction.unwind = afr_mknod_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame = frame;
         local->transaction.basename = AFR_BASENAME (loc->path);
@@ -546,7 +559,7 @@ out:
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
                 AFR_STACK_UNWIND (mknod, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -586,7 +599,8 @@ afr_mkdir_unwind (call_frame_t *frame, xlator_t *this)
                                   local->op_ret, local->op_errno,
                                   local->cont.mkdir.inode,
                                   unwind_buf, &local->cont.mkdir.preparent,
-                                  &local->cont.mkdir.postparent);
+                                  &local->cont.mkdir.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -597,7 +611,7 @@ int
 afr_mkdir_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, inode_t *inode,
                     struct iatt *buf, struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t     *local          = NULL;
         afr_private_t   *priv           = NULL;
@@ -682,7 +696,8 @@ afr_mkdir_wind (call_frame_t *frame, xlator_t *this)
                                            priv->children[i],
                                            priv->children[i]->fops->mkdir,
                                            &local->loc, local->cont.mkdir.mode,
-                                           local->cont.mkdir.params);
+                                           local->umask,
+                                           local->xdata_req);
                         if (!--call_count)
                                 break;
                 }
@@ -709,7 +724,7 @@ afr_mkdir_done (call_frame_t *frame, xlator_t *this)
 
 int
 afr_mkdir (call_frame_t *frame, xlator_t *this,
-           loc_t *loc, mode_t mode, dict_t *params)
+           loc_t *loc, mode_t mode, mode_t umask, dict_t *params)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -731,7 +746,7 @@ afr_mkdir (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -748,14 +763,18 @@ afr_mkdir (call_frame_t *frame, xlator_t *this,
         UNLOCK (&priv->read_child_lock);
 
         local->cont.mkdir.mode  = mode;
+        local->umask = umask;
         if (params)
-                local->cont.mkdir.params = dict_ref (params);
+                local->xdata_req = dict_ref (params);
 
         local->transaction.fop    = afr_mkdir_wind;
         local->transaction.done   = afr_mkdir_done;
         local->transaction.unwind = afr_mkdir_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame = frame;
         local->transaction.basename = AFR_BASENAME (loc->path);
@@ -769,7 +788,7 @@ out:
                         AFR_STACK_DESTROY (transaction_frame);
 
                 AFR_STACK_UNWIND (mkdir, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -809,7 +828,8 @@ afr_link_unwind (call_frame_t *frame, xlator_t *this)
                                   local->op_ret, local->op_errno,
                                   local->cont.link.inode,
                                   unwind_buf, &local->cont.link.preparent,
-                                  &local->cont.link.postparent);
+                                  &local->cont.link.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -820,7 +840,7 @@ int
 afr_link_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, inode_t *inode,
                    struct iatt *buf, struct iatt *preparent,
-                   struct iatt *postparent)
+                   struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t     *local          = NULL;
         afr_private_t   *priv           = NULL;
@@ -905,7 +925,7 @@ afr_link_wind (call_frame_t *frame, xlator_t *this)
                                            priv->children[i],
                                            priv->children[i]->fops->link,
                                            &local->loc,
-                                           &local->newloc);
+                                           &local->newloc, local->xdata_req);
 
                         if (!--call_count)
                                 break;
@@ -931,7 +951,7 @@ afr_link_done (call_frame_t *frame, xlator_t *this)
 
 int
 afr_link (call_frame_t *frame, xlator_t *this,
-          loc_t *oldloc, loc_t *newloc)
+          loc_t *oldloc, loc_t *newloc, dict_t *xdata)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -953,7 +973,7 @@ afr_link (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -962,6 +982,8 @@ afr_link (call_frame_t *frame, xlator_t *this,
 
         loc_copy (&local->loc,    oldloc);
         loc_copy (&local->newloc, newloc);
+        if (xdata)
+                local->xdata_req = dict_ref (xdata);
 
         LOCK (&priv->read_child_lock);
         {
@@ -974,7 +996,10 @@ afr_link (call_frame_t *frame, xlator_t *this,
         local->transaction.done   = afr_link_done;
         local->transaction.unwind = afr_link_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, newloc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, newloc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame   = frame;
         local->transaction.basename     = AFR_BASENAME (newloc->path);
@@ -987,7 +1012,7 @@ out:
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
                 AFR_STACK_UNWIND (link, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -1027,7 +1052,8 @@ afr_symlink_unwind (call_frame_t *frame, xlator_t *this)
                                   local->op_ret, local->op_errno,
                                   local->cont.symlink.inode,
                                   unwind_buf, &local->cont.symlink.preparent,
-                                  &local->cont.symlink.postparent);
+                                  &local->cont.symlink.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -1038,7 +1064,7 @@ int
 afr_symlink_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                       int32_t op_ret, int32_t op_errno, inode_t *inode,
                       struct iatt *buf, struct iatt *preparent,
-                      struct iatt *postparent)
+                      struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t     *local          = NULL;
         afr_private_t   *priv           = NULL;
@@ -1124,7 +1150,8 @@ afr_symlink_wind (call_frame_t *frame, xlator_t *this)
                                            priv->children[i]->fops->symlink,
                                            local->cont.symlink.linkpath,
                                            &local->loc,
-                                           local->cont.symlink.params);
+                                           local->umask,
+                                           local->xdata_req);
 
                         if (!--call_count)
                                 break;
@@ -1151,7 +1178,7 @@ afr_symlink_done (call_frame_t *frame, xlator_t *this)
 
 int
 afr_symlink (call_frame_t *frame, xlator_t *this,
-             const char *linkpath, loc_t *loc, dict_t *params)
+             const char *linkpath, loc_t *loc, mode_t umask, dict_t *params)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -1173,7 +1200,7 @@ afr_symlink (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -1190,14 +1217,18 @@ afr_symlink (call_frame_t *frame, xlator_t *this,
         UNLOCK (&priv->read_child_lock);
 
         local->cont.symlink.linkpath = gf_strdup (linkpath);
+        local->umask = umask;
         if (params)
-                local->cont.symlink.params = dict_ref (params);
+                local->xdata_req = dict_ref (params);
 
         local->transaction.fop    = afr_symlink_wind;
         local->transaction.done   = afr_symlink_done;
         local->transaction.unwind = afr_symlink_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame   = frame;
         local->transaction.basename     = AFR_BASENAME (loc->path);
@@ -1210,7 +1241,7 @@ out:
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
                 AFR_STACK_UNWIND (symlink, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -1251,7 +1282,8 @@ afr_rename_unwind (call_frame_t *frame, xlator_t *this)
                                   &local->cont.rename.preoldparent,
                                   &local->cont.rename.postoldparent,
                                   &local->cont.rename.prenewparent,
-                                  &local->cont.rename.postnewparent);
+                                  &local->cont.rename.postnewparent,
+                                  NULL);
         }
 
         return 0;
@@ -1262,7 +1294,8 @@ int
 afr_rename_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *buf,
                      struct iatt *preoldparent, struct iatt *postoldparent,
-                     struct iatt *prenewparent, struct iatt *postnewparent)
+                     struct iatt *prenewparent, struct iatt *postnewparent,
+                     dict_t *xdata)
 {
         afr_local_t *   local = NULL;
         int call_count = -1;
@@ -1341,7 +1374,7 @@ afr_rename_wind (call_frame_t *frame, xlator_t *this)
                                            priv->children[i],
                                            priv->children[i]->fops->rename,
                                            &local->loc,
-                                           &local->newloc);
+                                           &local->newloc, NULL);
                         if (!--call_count)
                                 break;
                 }
@@ -1366,7 +1399,7 @@ afr_rename_done (call_frame_t *frame, xlator_t *this)
 
 int
 afr_rename (call_frame_t *frame, xlator_t *this,
-            loc_t *oldloc, loc_t *newloc)
+            loc_t *oldloc, loc_t *newloc, dict_t *xdata)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -1388,7 +1421,7 @@ afr_rename (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -1404,8 +1437,14 @@ afr_rename (call_frame_t *frame, xlator_t *this,
         local->transaction.done   = afr_rename_done;
         local->transaction.unwind = afr_rename_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, oldloc);
-        afr_build_parent_loc (&local->transaction.new_parent_loc, newloc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, oldloc,
+                                    &op_errno);
+        if (ret)
+                goto out;
+        ret = afr_build_parent_loc (&local->transaction.new_parent_loc, newloc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame   = frame;
         local->transaction.basename     = AFR_BASENAME (oldloc->path);
@@ -1420,7 +1459,7 @@ out:
                         AFR_STACK_DESTROY (transaction_frame);
 
                 AFR_STACK_UNWIND (rename, frame, -1, op_errno,
-                                  NULL, NULL, NULL, NULL, NULL);
+                                  NULL, NULL, NULL, NULL, NULL, NULL);
         }
 
         return 0;
@@ -1451,7 +1490,8 @@ afr_unlink_unwind (call_frame_t *frame, xlator_t *this)
                 AFR_STACK_UNWIND (unlink, main_frame,
                                   local->op_ret, local->op_errno,
                                   &local->cont.unlink.preparent,
-                                  &local->cont.unlink.postparent);
+                                  &local->cont.unlink.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -1461,7 +1501,7 @@ afr_unlink_unwind (call_frame_t *frame, xlator_t *this)
 int
 afr_unlink_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *preparent,
-                     struct iatt *postparent)
+                     struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
         int call_count  = -1;
@@ -1536,7 +1576,8 @@ afr_unlink_wind (call_frame_t *frame, xlator_t *this)
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->unlink,
-                                           &local->loc);
+                                           &local->loc, local->xflag,
+                                           local->xdata_req);
 
                         if (!--call_count)
                                 break;
@@ -1562,7 +1603,7 @@ afr_unlink_done (call_frame_t *frame, xlator_t *this)
 
 int32_t
 afr_unlink (call_frame_t *frame, xlator_t *this,
-            loc_t *loc)
+            loc_t *loc, int xflag, dict_t *xdata)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -1584,7 +1625,7 @@ afr_unlink (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -1592,12 +1633,18 @@ afr_unlink (call_frame_t *frame, xlator_t *this,
                 goto out;
 
         loc_copy (&local->loc, loc);
+        local->xflag = xflag;
+        if (xdata)
+                local->xdata_req = dict_ref (xdata);
 
         local->transaction.fop    = afr_unlink_wind;
         local->transaction.done   = afr_unlink_done;
         local->transaction.unwind = afr_unlink_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame = frame;
         local->transaction.basename = AFR_BASENAME (loc->path);
@@ -1610,7 +1657,7 @@ out:
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
                 AFR_STACK_UNWIND (unlink, frame, -1, op_errno,
-                                  NULL, NULL);
+                                  NULL, NULL, NULL);
         }
 
         return 0;
@@ -1643,7 +1690,8 @@ afr_rmdir_unwind (call_frame_t *frame, xlator_t *this)
                 AFR_STACK_UNWIND (rmdir, main_frame,
                                   local->op_ret, local->op_errno,
                                   &local->cont.rmdir.preparent,
-                                  &local->cont.rmdir.postparent);
+                                  &local->cont.rmdir.postparent,
+                                  NULL);
         }
 
         return 0;
@@ -1653,7 +1701,7 @@ afr_rmdir_unwind (call_frame_t *frame, xlator_t *this)
 int
 afr_rmdir_wind_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                     int32_t op_ret, int32_t op_errno, struct iatt *preparent,
-                    struct iatt *postparent)
+                    struct iatt *postparent, dict_t *xdata)
 {
         afr_local_t *   local = NULL;
         int call_count  = -1;
@@ -1729,7 +1777,8 @@ afr_rmdir_wind (call_frame_t *frame, xlator_t *this)
                                            (void *) (long) i,
                                            priv->children[i],
                                            priv->children[i]->fops->rmdir,
-                                           &local->loc, local->cont.rmdir.flags);
+                                           &local->loc, local->cont.rmdir.flags,
+                                           NULL);
 
                         if (!--call_count)
                                 break;
@@ -1755,7 +1804,7 @@ afr_rmdir_done (call_frame_t *frame, xlator_t *this)
 
 int
 afr_rmdir (call_frame_t *frame, xlator_t *this,
-           loc_t *loc, int flags)
+           loc_t *loc, int flags, dict_t *xdata)
 {
         afr_private_t * priv  = NULL;
         afr_local_t   * local = NULL;
@@ -1777,7 +1826,7 @@ afr_rmdir (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (transaction_frame->local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (transaction_frame->local, out);
         local = transaction_frame->local;
 
         ret = afr_local_init (local, priv, &op_errno);
@@ -1791,7 +1840,10 @@ afr_rmdir (call_frame_t *frame, xlator_t *this,
         local->transaction.done   = afr_rmdir_done;
         local->transaction.unwind = afr_rmdir_unwind;
 
-        afr_build_parent_loc (&local->transaction.parent_loc, loc);
+        ret = afr_build_parent_loc (&local->transaction.parent_loc, loc,
+                                    &op_errno);
+        if (ret)
+                goto out;
 
         local->transaction.main_frame = frame;
         local->transaction.basename = AFR_BASENAME (loc->path);
@@ -1803,7 +1855,7 @@ out:
         if (ret < 0) {
                 if (transaction_frame)
                         AFR_STACK_DESTROY (transaction_frame);
-                AFR_STACK_UNWIND (rmdir, frame, -1, op_errno, NULL, NULL);
+                AFR_STACK_UNWIND (rmdir, frame, -1, op_errno, NULL, NULL, NULL);
         }
 
         return 0;

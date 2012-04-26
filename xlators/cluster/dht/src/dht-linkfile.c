@@ -34,14 +34,15 @@ int
 dht_linkfile_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          int op_ret, int op_errno, inode_t *inode,
                          struct iatt *stbuf, struct iatt *preparent,
-                         struct iatt *postparent)
+                         struct iatt *postparent, dict_t *xdata)
 {
         dht_local_t  *local = NULL;
 
         local = frame->local;
 
         local->linkfile.linkfile_cbk (frame, cookie, this, op_ret, op_errno,
-                                      inode, stbuf, preparent, postparent);
+                                      inode, stbuf, preparent, postparent,
+                                      xdata);
         return 0;
 }
 
@@ -74,6 +75,11 @@ dht_linkfile_create (call_frame_t *frame, fop_mknod_cbk_t linkfile_cbk,
                                 "%s: gfid set failed", loc->path);
         }
 
+        ret = dict_set_str (dict, GLUSTERFS_INTERNAL_FOP_KEY, "yes");
+        if (ret)
+                gf_log ("dht-linkfile", GF_LOG_INFO,
+                        "%s: internal-fop set failed", loc->path);
+
         ret = dict_set_str (dict, "trusted.glusterfs.dht.linkto",
                                    tovol->name);
 
@@ -86,7 +92,7 @@ dht_linkfile_create (call_frame_t *frame, fop_mknod_cbk_t linkfile_cbk,
 
         STACK_WIND (frame, dht_linkfile_create_cbk,
                     fromvol, fromvol->fops->mknod, loc,
-                    S_IFREG | DHT_LINKFILE_MODE, 0, dict);
+                    S_IFREG | DHT_LINKFILE_MODE, 0, 0, dict);
 
         if (need_unref && dict)
                 dict_unref (dict);
@@ -94,7 +100,7 @@ dht_linkfile_create (call_frame_t *frame, fop_mknod_cbk_t linkfile_cbk,
         return 0;
 out:
         local->linkfile.linkfile_cbk (frame, NULL, frame->this, -1, ENOMEM,
-                                      loc->inode, NULL, NULL, NULL);
+                                      loc->inode, NULL, NULL, NULL, NULL);
 
         if (need_unref && dict)
                 dict_unref (dict);
@@ -106,7 +112,8 @@ out:
 int
 dht_linkfile_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                          int32_t op_ret, int32_t op_errno,
-                         struct iatt *preparent, struct iatt *postparent)
+                         struct iatt *preparent, struct iatt *postparent,
+                         dict_t *xdata)
 {
         dht_local_t   *local = NULL;
         call_frame_t  *prev = NULL;
@@ -150,7 +157,7 @@ dht_linkfile_unlink (call_frame_t *frame, xlator_t *this,
 
         STACK_WIND (unlink_frame, dht_linkfile_unlink_cbk,
                     subvol, subvol->fops->unlink,
-                    &unlink_local->loc);
+                    &unlink_local->loc, 0, NULL);
 
         return 0;
 err:

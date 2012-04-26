@@ -79,9 +79,19 @@
 #define ZR_STRICT_VOLFILE_CHECK "strict-volfile-check"
 #define ZR_DUMP_FUSE            "dump-fuse"
 
+#define GF_XATTR_CLRLK_CMD      "glusterfs.clrlk"
 #define GF_XATTR_PATHINFO_KEY   "trusted.glusterfs.pathinfo"
+#define GF_XATTR_NODE_UUID_KEY  "trusted.glusterfs.node-uuid"
+
+#define XATTR_IS_PATHINFO(x)  (strncmp (x, GF_XATTR_PATHINFO_KEY,       \
+                                        strlen (GF_XATTR_PATHINFO_KEY)) == 0)
+#define XATTR_IS_NODE_UUID(x) (strncmp (x, GF_XATTR_NODE_UUID_KEY,      \
+                                        strlen (GF_XATTR_NODE_UUID_KEY)) == 0)
+
 #define GF_XATTR_LINKINFO_KEY   "trusted.distribute.linkinfo"
 #define GFID_XATTR_KEY "trusted.gfid"
+
+#define GLUSTERFS_INTERNAL_FOP_KEY  "glusterfs-internal-fop"
 
 #define ZR_FILE_CONTENT_STR     "glusterfs.file."
 #define ZR_FILE_CONTENT_STRLEN 15
@@ -90,14 +100,23 @@
 #define GLUSTERFS_INODELK_COUNT "glusterfs.inodelk-count"
 #define GLUSTERFS_ENTRYLK_COUNT "glusterfs.entrylk-count"
 #define GLUSTERFS_POSIXLK_COUNT "glusterfs.posixlk-count"
+#define GLUSTERFS_PARENT_ENTRYLK "glusterfs.parent-entrylk"
 #define QUOTA_SIZE_KEY "trusted.glusterfs.quota.size"
+#define GFID_TO_PATH_KEY "glusterfs.gfid2path"
 
+/* Index xlator related */
+#define GF_XATTROP_INDEX_GFID "glusterfs.xattrop_index_gfid"
+
+#define GF_GFIDLESS_LOOKUP "gfidless-lookup"
 /* replace-brick and pump related internal xattrs */
 #define RB_PUMP_CMD_START       "glusterfs.pump.start"
 #define RB_PUMP_CMD_PAUSE       "glusterfs.pump.pause"
 #define RB_PUMP_CMD_COMMIT      "glusterfs.pump.commit"
 #define RB_PUMP_CMD_ABORT       "glusterfs.pump.abort"
 #define RB_PUMP_CMD_STATUS      "glusterfs.pump.status"
+
+#define POSIX_ACL_DEFAULT_XATTR "system.posix_acl_default"
+#define POSIX_ACL_ACCESS_XATTR "system.posix_acl_access"
 
 #define GLUSTERFS_RDMA_INLINE_THRESHOLD       (2048)
 #define GLUSTERFS_RDMA_MAX_HEADER_SIZE        (228) /* (sizeof (rdma_header_t)                 \
@@ -357,6 +376,13 @@ struct _glusterfs_ctx {
                                              mempools, used to log details of
                                              mempool in statedump */
         char                *statedump_path;
+
+        struct mem_pool    *dict_pool;
+        struct mem_pool    *dict_pair_pool;
+        struct mem_pool    *dict_data_pool;
+
+        int                 mem_accounting; /* if value is other than 0, it
+                                               will be set */
 };
 typedef struct _glusterfs_ctx glusterfs_ctx_t;
 
@@ -378,8 +404,10 @@ typedef enum {
         GF_EVENT_VOLFILE_MODIFIED,
         GF_EVENT_GRAPH_NEW,
         GF_EVENT_TRANSLATOR_INFO,
-        GF_EVENT_TRIGGER_HEAL,
+        GF_EVENT_TRANSLATOR_OP,
         GF_EVENT_AUTH_FAILED,
+        GF_EVENT_VOLUME_DEFRAG,
+        GF_EVENT_PARENT_DOWN,
         GF_EVENT_MAXVAL,
 } glusterfs_event_t;
 
@@ -394,7 +422,6 @@ struct gf_flock {
         pid_t        l_pid;
         gf_lkowner_t l_owner;
 };
-
 
 extern char *glusterfs_strevent (glusterfs_event_t ev);
 

@@ -27,6 +27,30 @@
 #include "afr-self-heal.h"
 #include "pump.h"
 
+void
+afr_sh_reset (call_frame_t *frame, xlator_t *this)
+{
+        afr_local_t     *local = NULL;
+        afr_self_heal_t *sh = NULL;
+        afr_private_t   *priv = NULL;
+
+        local = frame->local;
+        sh = &local->self_heal;
+        priv = this->private;
+
+        memset (sh->child_errno, 0,
+                sizeof (*sh->child_errno) * priv->child_count);
+        memset (sh->buf, 0, sizeof (*sh->buf) * priv->child_count);
+        memset (sh->parentbufs, 0,
+                sizeof (*sh->parentbufs) * priv->child_count);
+        memset (sh->success, 0, sizeof (*sh->success) * priv->child_count);
+        memset (sh->locked_nodes, 0,
+                sizeof (*sh->locked_nodes) * priv->child_count);
+        sh->active_sinks = 0;
+
+        afr_reset_xattr (sh->xattr, priv->child_count);
+}
+
 //Intersection[child]=1 if child is part of intersection
 void
 afr_children_intersection_get (int32_t *set1, int32_t *set2,
@@ -882,31 +906,20 @@ afr_sh_missing_entries_done (call_frame_t *frame, xlator_t *this)
 {
         afr_local_t     *local = NULL;
         afr_self_heal_t *sh = NULL;
-        afr_private_t   *priv = NULL;
-        int              i = 0;
 
         local = frame->local;
         sh = &local->self_heal;
-        priv = this->private;
 
-//      memset (sh->child_errno, 0, sizeof (int) * priv->child_count);
-        memset (sh->buf, 0, sizeof (struct iatt) * priv->child_count);
+        afr_sh_reset (frame, this);
 
-        for (i = 0; i < priv->child_count; i++) {
-                sh->locked_nodes[i] = 0;
-        }
-
-        for (i = 0; i < priv->child_count; i++) {
-                if (sh->xattr[i])
-                        dict_unref (sh->xattr[i]);
-                sh->xattr[i] = NULL;
-        }
-
-        if (local->govinda_gOvinda || sh->op_failed) {
+        if (local->govinda_gOvinda) {
                 gf_log (this->name, GF_LOG_INFO,
                         "split brain found, aborting selfheal of %s",
                         local->loc.path);
                 sh->op_failed = 1;
+        }
+
+        if (sh->op_failed) {
                 sh->completion_cbk (frame, this);
         } else {
                 gf_log (this->name, GF_LOG_TRACE,
@@ -1040,7 +1053,7 @@ afr_impunge_frame_create (call_frame_t *frame, xlator_t *this,
                 goto out;
         }
 
-        ALLOC_OR_GOTO (impunge_local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (impunge_local, out);
 
         local = frame->local;
         new_frame->local = impunge_local;
@@ -1086,6 +1099,7 @@ afr_sh_missing_entry_call_impunge_recreate (call_frame_t *frame, xlator_t *this,
         unsigned int    enoent_count = 0;
         afr_private_t   *priv = NULL;
         int             i = 0;
+        int32_t         op_errno = 0;
 
         local = frame->local;
         sh    = &local->self_heal;
@@ -1106,7 +1120,12 @@ afr_sh_missing_entry_call_impunge_recreate (call_frame_t *frame, xlator_t *this,
         impunge_local = impunge_frame->local;
         impunge_sh    = &impunge_local->self_heal;
         loc_copy (&impunge_local->loc, &local->loc);
-        afr_build_parent_loc (&impunge_sh->parent_loc, &impunge_local->loc);
+        ret = afr_build_parent_loc (&impunge_sh->parent_loc,
+                                    &impunge_local->loc, &op_errno);
+        if (ret) {
+                ret = -op_errno;
+                goto out;
+        }
         impunge_local->call_count = enoent_count;
         impunge_sh->entrybuf = sh->buf[sh->source];
         impunge_sh->parentbuf = sh->parentbufs[sh->source];
@@ -1344,13 +1363,14 @@ afr_sh_call_entry_expunge_remove (call_frame_t *frame, xlator_t *this,
         afr_self_heal_t *sh = NULL;
         afr_self_heal_t *expunge_sh = NULL;
         int32_t         op_errno = 0;
+        int             ret = 0;
 
         expunge_frame = copy_frame (frame);
         if (!expunge_frame) {
                 goto out;
         }
 
-        ALLOC_OR_GOTO (expunge_local, afr_local_t, out);
+        AFR_LOCAL_ALLOC_OR_GOTO (expunge_local, out);
 
         local = frame->local;
         sh = &local->self_heal;
@@ -1358,6 +1378,12 @@ afr_sh_call_entry_expunge_remove (call_frame_t *frame, xlator_t *this,
         expunge_sh = &expunge_local->self_heal;
         expunge_sh->sh_frame = frame;
         loc_copy (&expunge_local->loc, &local->loc);
+        ret = afr_build_parent_loc (&expunge_sh->parent_loc,
+                                    &expunge_local->loc, &op_errno);
+        if (ret) {
+                ret = -op_errno;
+                goto out;
+        }
         sh->expunge_done = expunge_done;
         afr_sh_entry_expunge_remove (expunge_frame, this, child_index, buf,
                                      parentbuf);
@@ -1407,7 +1433,8 @@ afr_sh_purge_stale_entries_done (call_frame_t *frame, xlator_t *this)
                                               afr_sh_missing_entries_lookup_done,
                                               sh->sh_gfid_req,
                                               AFR_LOOKUP_FAIL_CONFLICTS|
-                                              AFR_LOOKUP_FAIL_MISSING_GFIDS);
+                                              AFR_LOOKUP_FAIL_MISSING_GFIDS,
+                                              NULL);
                 } else {
                         //No need to set gfid so goto missing entries lookup done
                         //Behave as if you have done the lookup
@@ -1655,25 +1682,17 @@ afr_sh_find_fresh_parents (call_frame_t *frame, xlator_t *this,
         sh = &local->self_heal;
         priv = this->private;
 
-        /* If We can't find a fresh parent directory here,
-         * we wont know which subvol is correct without finding a parent dir
-         * upwards which has correct xattrs, for that we may have to
-         * do lookups till root, we dont wanna do that,
-         * instead make sure that if there are conflicting gfid
-         * parent dirs, self-heal thus lookup is failed with EIO.
-         * if there are missing entries we dont know whether to delete or
-         * create so fail with EIO,
-         * If there are conflicting xattr fail with EIO.
-         */
         if (op_ret < 0)
                 goto out;
         enoent_count = afr_errno_count (NULL, sh->child_errno,
                                         priv->child_count, ENOENT);
         if (enoent_count > 0) {
-                gf_log (this->name, GF_LOG_ERROR, "Parent dir missing for %s,"
-                        " in missing entry self-heal, aborting self-heal",
+                gf_log (this->name, GF_LOG_INFO, "Parent dir missing for %s,"
+                        " in missing entry self-heal, aborting missing-entry "
+                        "self-heal",
                         local->loc.path);
-                goto out;
+                afr_sh_missing_entries_finish (frame, this);
+                return;
         }
 
         nsources = afr_build_sources (this, sh->xattr, sh->buf,
@@ -1692,6 +1711,7 @@ afr_sh_find_fresh_parents (call_frame_t *frame, xlator_t *this,
                 gf_log (this->name, GF_LOG_ERROR, "No sources for dir "
                         "of %s, in missing entry self-heal, aborting "
                         "self-heal", local->loc.path);
+                op_errno = EIO;
                 goto out;
         }
 
@@ -1699,16 +1719,18 @@ afr_sh_find_fresh_parents (call_frame_t *frame, xlator_t *this,
         if (source == -1) {
                 GF_ASSERT (0);
                 gf_log (this->name, GF_LOG_DEBUG, "No active sources found.");
+                op_errno = EIO;
                 goto out;
         }
         afr_get_fresh_children (sh->success_children, sh->sources,
                                 sh->fresh_parent_dirs, priv->child_count);
         afr_sh_common_lookup (frame, this, &local->loc,
-                              afr_sh_children_lookup_done, NULL, 0);
+                              afr_sh_children_lookup_done, NULL, 0,
+                              NULL);
         return;
 
 out:
-        afr_sh_set_error (sh, EIO);
+        afr_sh_set_error (sh, op_errno);
         sh->op_failed = 1;
         afr_sh_missing_entries_finish (frame, this);
         return;
@@ -1738,7 +1760,7 @@ afr_sh_common_reset (afr_self_heal_t *sh, unsigned int child_count)
 int
 afr_sh_common_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
                       afr_lookup_done_cbk_t lookup_done , uuid_t gfid,
-                      int32_t flags)
+                      int32_t flags, dict_t *xdata)
 {
         afr_local_t    *local = NULL;
         int             i = 0;
@@ -1820,7 +1842,8 @@ afr_sh_post_nb_entrylk_conflicting_sh_cbk (call_frame_t *frame, xlator_t *this)
                         "Non blocking entrylks done. Proceeding to FOP");
                 afr_sh_common_lookup (frame, this, &sh->parent_loc,
                                       afr_sh_find_fresh_parents,
-                                      NULL, AFR_LOOKUP_FAIL_CONFLICTS);
+                                      NULL, AFR_LOOKUP_FAIL_CONFLICTS,
+                                      NULL);
         }
 
         return 0;
@@ -1847,7 +1870,8 @@ afr_sh_post_nb_entrylk_gfid_sh_cbk (call_frame_t *frame, xlator_t *this)
                 afr_sh_common_lookup (frame, this, &local->loc,
                                       afr_sh_missing_entries_lookup_done,
                                       sh->sh_gfid_req, AFR_LOOKUP_FAIL_CONFLICTS|
-                                      AFR_LOOKUP_FAIL_MISSING_GFIDS);
+                                      AFR_LOOKUP_FAIL_MISSING_GFIDS,
+                                      NULL);
         }
 
         return 0;
@@ -1883,6 +1907,9 @@ afr_self_heal_parent_entrylk (call_frame_t *frame, xlator_t *this,
 {
         afr_local_t         *local    = NULL;
         afr_self_heal_t     *sh       = NULL;
+        afr_internal_lock_t *int_lock = NULL;
+        int                 ret       = -1;
+        int32_t             op_errno  = 0;
 
         local    = frame->local;
         sh       = &local->self_heal;
@@ -1891,11 +1918,17 @@ afr_self_heal_parent_entrylk (call_frame_t *frame, xlator_t *this,
                 "attempting to recreate missing entries for path=%s",
                 local->loc.path);
 
-        GF_ASSERT (local->loc.parent);
-        afr_build_parent_loc (&sh->parent_loc, &local->loc);
+        ret = afr_build_parent_loc (&sh->parent_loc, &local->loc, &op_errno);
+        if (ret)
+                goto out;
 
         afr_sh_entrylk (frame, this, &sh->parent_loc, NULL,
                         lock_cbk);
+        return 0;
+out:
+        int_lock = &local->internal_lock;
+        int_lock->lock_op_ret = -1;
+        lock_cbk (frame, this);
         return 0;
 }
 
@@ -1926,8 +1959,7 @@ afr_local_t *afr_local_copy (afr_local_t *l, xlator_t *this)
 
         sh = &l->self_heal;
 
-        lc = GF_CALLOC (1, sizeof (afr_local_t),
-                        gf_afr_mt_afr_local_t);
+        lc = mem_get0 (this->local_pool);
         if (!lc)
                 goto out;
 
@@ -2025,7 +2057,8 @@ afr_self_heal_completion_cbk (call_frame_t *bgsh_frame, xlator_t *this)
         FRAME_SU_UNDO (bgsh_frame, afr_local_t);
 
         if (!sh->unwound && sh->unwind) {
-                sh->unwind (sh->orig_frame, this, sh->op_ret, sh->op_errno);
+                sh->unwind (sh->orig_frame, this, sh->op_ret, sh->op_errno,
+                            sh->op_failed);
         }
 
         if (sh->background) {
@@ -2071,7 +2104,7 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
         sh_frame        = copy_frame (frame);
         if (!sh_frame)
                 goto out;
-        afr_set_lk_owner (sh_frame, this);
+        afr_set_lk_owner (sh_frame, this, sh_frame->root);
         afr_set_low_priority (sh_frame);
 
         sh_local        = afr_local_copy (local, this);
@@ -2135,8 +2168,7 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
                 UNLOCK (&priv->lock);
         }
 
-        if (!local->loc.name) {
-                /* nameless lookup */
+        if (!local->loc.parent) {
                 sh->do_missing_entry_self_heal = _gf_false;
                 sh->do_gfid_self_heal = _gf_false;
         }
@@ -2165,7 +2197,7 @@ afr_self_heal (call_frame_t *frame, xlator_t *this, inode_t *inode)
 
 out:
         if (op_errno) {
-                orig_sh->unwind (frame, this, -1, op_errno);
+                orig_sh->unwind (frame, this, -1, op_errno, 1);
                 if (sh_frame)
                         AFR_STACK_DESTROY (sh_frame);
         }
@@ -2224,13 +2256,21 @@ afr_self_heal_type_for_transaction (afr_transaction_type type)
 }
 
 int
-afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name, uuid_t gfid)
+afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name)
 {
         int   ret = -1;
+        uuid_t pargfid = {0};
 
-        if (!child) {
+        if (!child)
                 goto out;
-        }
+
+        if (!uuid_is_null (parent->inode->gfid))
+                uuid_copy (pargfid, parent->inode->gfid);
+        else if (!uuid_is_null (parent->gfid))
+                uuid_copy (pargfid, parent->gfid);
+
+        if (uuid_is_null (pargfid))
+                goto out;
 
         if (strcmp (parent->path, "/") == 0)
                 ret = gf_asprintf ((char **)&child->path, "/%s", name);
@@ -2243,26 +2283,22 @@ afr_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent, char *name, uu
                         "asprintf failed while setting child path");
         }
 
-        if (!child->path) {
-                goto out;
-        }
-
         child->name = strrchr (child->path, '/');
         if (child->name)
                 child->name++;
 
         child->parent = inode_ref (parent->inode);
         child->inode = inode_new (parent->inode->table);
+        uuid_copy (child->pargfid, pargfid);
 
         if (!child->inode) {
                 ret = -1;
                 goto out;
         }
-        uuid_copy (child->gfid, gfid);
 
         ret = 0;
 out:
-        if (ret == -1)
+        if ((ret == -1) && child)
                 loc_wipe (child);
 
         return ret;

@@ -116,7 +116,7 @@ void* __gf_default_realloc (void *oldptr, size_t size)
 
 #define GF_REALLOC(ptr, size)  __gf_realloc (ptr, size)
 
-#define GF_FREE(free_ptr) __gf_free (free_ptr);
+#define GF_FREE(free_ptr) __gf_free (free_ptr)
 
 static inline
 char * gf_strdup (const char *src)
@@ -147,7 +147,10 @@ struct mem_pool {
         void             *pool_end;
         int               real_sizeof_type;
         uint64_t          alloc_count;
+        uint64_t          pool_misses;
         int               max_alloc;
+        int               curr_stdalloc;
+        int               max_stdalloc;
         char             *name;
         struct list_head  global_list;
 };

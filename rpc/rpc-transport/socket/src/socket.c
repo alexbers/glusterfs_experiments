@@ -823,6 +823,7 @@ __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vecto
         struct iobuf     *iobuf                  = NULL;
         uint32_t          remaining_size         = 0;
         ssize_t           readsize               = 0;
+        size_t            size = 0;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -907,7 +908,10 @@ sp_state_reading_proghdr:
 
         case SP_STATE_READ_PROGHDR:
                 if (priv->incoming.payload_vector.iov_base == NULL) {
-                        iobuf = iobuf_get (this->ctx->iobuf_pool);
+
+                        size = RPC_FRAGSIZE (priv->incoming.fraghdr) -
+                                priv->incoming.frag.bytes_read;
+                        iobuf = iobuf_get2 (this->ctx->iobuf_pool, size);
                         if (!iobuf) {
                                 ret = -1;
                                 break;
@@ -1048,6 +1052,7 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
         struct iobuf     *iobuf                    = NULL;
         uint32_t          gluster_read_rsp_hdr_len = 0;
         gfs3_read_rsp     read_rsp                 = {0, };
+        size_t            size                     = 0;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -1080,7 +1085,11 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
                         = SP_STATE_READ_PROC_HEADER;
 
                 if (priv->incoming.payload_vector.iov_base == NULL) {
-                        iobuf = iobuf_get (this->ctx->iobuf_pool);
+
+                        size = (RPC_FRAGSIZE (priv->incoming.fraghdr) -
+                                priv->incoming.frag.bytes_read);
+
+                        iobuf = iobuf_get2 (this->ctx->iobuf_pool, size);
                         if (iobuf == NULL) {
                                 ret = -1;
                                 goto out;
@@ -1100,6 +1109,8 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
 
                         priv->incoming.payload_vector.iov_base
                                 = iobuf_ptr (iobuf);
+
+                        priv->incoming.payload_vector.iov_len = size;
                 }
 
                 priv->incoming.frag.fragcurrent
@@ -2037,31 +2048,35 @@ socket_connect (rpc_transport_t *this, int port)
                 /* Cant help if setting socket options fails. We can continue
                  * working nonetheless.
                  */
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting receive window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
-                }
+                if (priv->windowsize != 0) {
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting receive window "
+                                        "size failed: %d: %d: %s",
+                                        priv->sock, priv->windowsize,
+                                        strerror (errno));
+                        }
 
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting send window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting send window size "
+                                        "failed: %d: %d: %s",
+                                        priv->sock, priv->windowsize,
+                                        strerror (errno));
+                        }
                 }
-
 
                 if (priv->nodelay) {
                         ret = __socket_nodelay (priv->sock);
+
                         if (ret == -1) {
                                 gf_log (this->name, GF_LOG_ERROR,
-                                        "setsockopt() failed for NODELAY (%s)",
-                                        strerror (errno));
+                                        "NODELAY on %d failed (%s)",
+                                        priv->sock, strerror (errno));
                         }
                 }
 
@@ -2193,22 +2208,26 @@ socket_listen (rpc_transport_t *this)
                 /* Cant help if setting socket options fails. We can continue
                  * working nonetheless.
                  */
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting receive window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
-                }
+                if (priv->windowsize != 0) {
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_RCVBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting receive window size "
+                                        "failed: %d: %d: %s", priv->sock,
+                                        priv->windowsize,
+                                        strerror (errno));
+                        }
 
-                if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
-                                &priv->windowsize,
-                                sizeof (priv->windowsize)) < 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "setting send window size failed: %d: %d: "
-                                "%s", priv->sock, priv->windowsize,
-                                strerror (errno));
+                        if (setsockopt (priv->sock, SOL_SOCKET, SO_SNDBUF,
+                                        &priv->windowsize,
+                                        sizeof (priv->windowsize)) < 0) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "setting send window size failed:"
+                                        " %d: %d: %s", priv->sock,
+                                        priv->windowsize,
+                                        strerror (errno));
+                        }
                 }
 
                 if (priv->nodelay) {
@@ -2499,10 +2518,11 @@ struct rpc_transport_ops tops = {
 int
 reconfigure (rpc_transport_t *this, dict_t *options)
 {
-        socket_private_t *priv = NULL;
-        gf_boolean_t      tmp_bool = _gf_false;
-        char             *optstr = NULL;
-        int               ret = 0;
+        socket_private_t *priv          = NULL;
+        gf_boolean_t      tmp_bool      = _gf_false;
+        char             *optstr        = NULL;
+        int               ret           = 0;
+        uint64_t          windowsize    = 0;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -2530,6 +2550,19 @@ reconfigure (rpc_transport_t *this, dict_t *options)
         }
         else
                 priv->keepalive = 1;
+
+        optstr = NULL;
+        if (dict_get_str (this->options, "tcp-window-size",
+                          &optstr) == 0) {
+                if (gf_string2bytesize (optstr, &windowsize) != 0) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "invalid number format: %s", optstr);
+                        goto out;
+                }
+        }
+
+        priv->windowsize = (int)windowsize;
+
         ret = 0;
 out:
         return ret;
@@ -2609,9 +2642,8 @@ socket_init (rpc_transport_t *this)
                 }
         }
 
-
         optstr = NULL;
-        if (dict_get_str (this->options, "transport.window-size",
+        if (dict_get_str (this->options, "tcp-window-size",
                           &optstr) == 0) {
                 if (gf_string2bytesize (optstr, &windowsize) != 0) {
                         gf_log (this->name, GF_LOG_ERROR,
@@ -2620,8 +2652,9 @@ socket_init (rpc_transport_t *this)
                 }
         }
 
-        optstr = NULL;
+        priv->windowsize = (int)windowsize;
 
+        optstr = NULL;
         /* Enable Keep-alive by default. */
         priv->keepalive = 1;
         priv->keepaliveintvl = 2;
@@ -2673,7 +2706,7 @@ socket_init (rpc_transport_t *this)
                 }
         }
 
-        priv->windowsize = (int)windowsize;
+        optstr = NULL;
 out:
         this->private = priv;
 
@@ -2755,10 +2788,10 @@ struct volume_options options[] = {
         { .key   = {"non-blocking-io"},
           .type  = GF_OPTION_TYPE_BOOL
         },
-        { .key   = {"transport.window-size"},
+        { .key   = {"tcp-window-size"},
           .type  = GF_OPTION_TYPE_SIZET,
           .min   = GF_MIN_SOCKET_WINDOW_SIZE,
-          .max   = GF_MAX_SOCKET_WINDOW_SIZE,
+          .max   = GF_MAX_SOCKET_WINDOW_SIZE
         },
         { .key   = {"transport.socket.nodelay"},
           .type  = GF_OPTION_TYPE_BOOL

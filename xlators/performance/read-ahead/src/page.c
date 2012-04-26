@@ -142,7 +142,8 @@ ra_waitq_return (ra_waitq_t *waitq)
 int
 ra_fault_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
               int32_t op_ret, int32_t op_errno, struct iovec *vector,
-              int32_t count, struct iatt *stbuf, struct iobref *iobref)
+              int32_t count, struct iatt *stbuf, struct iobref *iobref,
+              dict_t *xdata)
 {
         ra_local_t   *local          = NULL;
         off_t         pending_offset = 0;
@@ -233,7 +234,7 @@ unlock:
 
         fd_unref (local->fd);
 
-        GF_FREE (frame->local);
+        mem_put (frame->local);
         frame->local = NULL;
 
 out:
@@ -261,7 +262,7 @@ ra_page_fault (ra_file_t *file, call_frame_t *frame, off_t offset)
                 goto err;
         }
 
-        fault_local = GF_CALLOC (1, sizeof (ra_local_t), gf_ra_mt_ra_local_t);
+        fault_local = mem_get0 (THIS->local_pool);
         if (fault_local == NULL) {
                 STACK_DESTROY (fault_frame->root);
                 op_ret = -1;
@@ -278,7 +279,7 @@ ra_page_fault (ra_file_t *file, call_frame_t *frame, off_t offset)
         STACK_WIND (fault_frame, ra_fault_cbk,
                     FIRST_CHILD (fault_frame->this),
                     FIRST_CHILD (fault_frame->this)->fops->readv,
-                    file->fd, file->page_size, offset);
+                    file->fd, file->page_size, offset, 0, NULL);
 
         return;
 
@@ -447,11 +448,11 @@ ra_frame_unwind (call_frame_t *frame)
         file = (ra_file_t *)(long)tmp_file;
 
         STACK_UNWIND_STRICT (readv, frame, local->op_ret, local->op_errno,
-                             vector, count, &file->stbuf, iobref);
+                             vector, count, &file->stbuf, iobref, NULL);
 
         iobref_unref (iobref);
         pthread_mutex_destroy (&local->local_lock);
-        GF_FREE (local);
+        mem_put (local);
         GF_FREE (vector);
 
 out:
@@ -508,6 +509,9 @@ ra_page_wakeup (ra_page_t *page)
                 ra_frame_fill (page, frame);
         }
 
+        if (page->stale) {
+                ra_page_purge (page);
+        }
 out:
         return waitq;
 }

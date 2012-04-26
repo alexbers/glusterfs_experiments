@@ -362,7 +362,7 @@ destroy_client_lock (client_posix_lock_t *lock)
 int32_t
 delete_granted_locks_owner (fd_t *fd, gf_lkowner_t *owner)
 {
-        clnt_fd_ctx_t     *fdctx = NULL;
+        clnt_fd_ctx_t       *fdctx = NULL;
         client_posix_lock_t *lock  = NULL;
         client_posix_lock_t *tmp   = NULL;
         xlator_t            *this  = NULL;
@@ -608,6 +608,7 @@ decrement_reopen_fd_count (xlator_t *this, clnt_conf_t *conf)
         if (fd_count == 0) {
                 gf_log (this->name, GF_LOG_INFO,
                         "last fd open'd/lock-self-heal'd - notifying CHILD-UP");
+                client_set_lk_version (this);
                 client_notify_parents_child_up (this);
         }
 
@@ -620,7 +621,7 @@ client_remove_reserve_lock_cbk (call_frame_t *frame,
                                 xlator_t *this,
                                 int32_t op_ret,
                                 int32_t op_errno,
-                                struct gf_flock *lock)
+                                struct gf_flock *lock, dict_t *xdata)
 {
         clnt_local_t *local = NULL;
         clnt_conf_t  *conf  = NULL;
@@ -666,7 +667,7 @@ client_remove_reserve_lock (xlator_t *this, call_frame_t *frame,
 
         STACK_WIND (frame, client_remove_reserve_lock_cbk,
                     this, this->fops->lk,
-                    lock->fd, F_RESLK_UNLCK, &unlock);
+                    lock->fd, F_RESLK_UNLCK, &unlock, NULL);
 }
 
 static client_posix_lock_t *
@@ -698,7 +699,7 @@ client_reserve_lock_cbk (call_frame_t *frame,
                          xlator_t *this,
                          int32_t op_ret,
                          int32_t op_errno,
-                         struct gf_flock *lock)
+                         struct gf_flock *lock, dict_t *xdata)
 {
 
         clnt_local_t *local = NULL;
@@ -754,7 +755,7 @@ client_recovery_lock_cbk (call_frame_t *frame,
                           xlator_t *this,
                           int32_t op_ret,
                           int32_t op_errno,
-                          struct gf_flock *lock)
+                          struct gf_flock *lock, dict_t *xdata)
 {
         clnt_local_t *local = NULL;
         clnt_fd_ctx_t *fdctx = NULL;
@@ -794,7 +795,7 @@ client_recovery_lock_cbk (call_frame_t *frame,
 
                 STACK_WIND (frame, client_reserve_lock_cbk,
                             this, this->fops->lk,
-                            next_lock->fd, F_RESLK_LCK, &reserve_flock);
+                            next_lock->fd, F_RESLK_LCK, &reserve_flock, NULL);
                 goto out;
 
         }
@@ -831,7 +832,7 @@ client_send_recovery_lock (call_frame_t *frame, xlator_t *this,
         STACK_WIND (frame, client_recovery_lock_cbk,
                     this, this->fops->lk,
                     lock->fd, F_SETLK,
-                    &(lock->user_flock));
+                    &(lock->user_flock), NULL);
 
         return 0;
 }
@@ -863,7 +864,7 @@ client_attempt_lock_recovery (xlator_t *this, clnt_fd_ctx_t *fdctx)
         struct gf_flock reserve_flock;
         int ret = 0;
 
-        local = GF_CALLOC (1, sizeof (*local), gf_client_mt_clnt_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 ret = -ENOMEM;
                 goto out;
@@ -895,7 +896,7 @@ client_attempt_lock_recovery (xlator_t *this, clnt_fd_ctx_t *fdctx)
 
         STACK_WIND (frame, client_reserve_lock_cbk,
                     this, this->fops->lk,
-                    lock->fd, F_RESLK_LCK, &reserve_flock);
+                    lock->fd, F_RESLK_LCK, &reserve_flock, NULL);
 
 out:
         return ret;

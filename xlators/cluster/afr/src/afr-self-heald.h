@@ -27,17 +27,28 @@
 #define AFR_ALL_CHILDREN -1
 
 typedef struct afr_crawl_data_ {
-        int     child;
-        pid_t   pid;
+        int                 child;
+        pid_t               pid;
+        afr_crawl_type_t    crawl;
+        xlator_t            *readdir_xl;
+        void                *op_data;
+        int                 crawl_flags;
+        int (*process_entry) (xlator_t *this, struct afr_crawl_data_ *crawl_data,
+                              gf_dirent_t *entry, loc_t *child, loc_t *parent,
+                              struct iatt *iattr);
 } afr_crawl_data_t;
 
-void afr_proactive_self_heal (xlator_t *this, int idx);
+typedef int (*process_entry_cbk_t) (xlator_t *this, afr_crawl_data_t *crawl_data,
+                              gf_dirent_t *entry, loc_t *child, loc_t *parent,
+                              struct iatt *iattr);
 
-void afr_build_root_loc (inode_t *inode, loc_t *loc);
+void afr_build_root_loc (xlator_t *this, loc_t *loc);
 
 int afr_set_root_gfid (dict_t *dict);
 
-inline void
-afr_fill_loc_info (loc_t *loc, struct iatt *iatt, struct iatt *parent);
+void
+afr_proactive_self_heal (void *data);
 
+int
+afr_xl_op (xlator_t *this, dict_t *input, dict_t *output);
 #endif /* __AFR_SELF_HEALD_H__ */

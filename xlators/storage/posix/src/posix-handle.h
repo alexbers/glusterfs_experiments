@@ -74,6 +74,11 @@
                         "null gfid for path %s", loc->path);            \
                 break;                                                  \
         }                                                               \
+        if (LOC_HAS_ABSPATH (loc)) {                                    \
+                MAKE_REAL_PATH (rpath, this, loc->path);                \
+                op_ret = posix_pstat (this, loc->gfid, rpath, iatt_p);  \
+                break;                                                  \
+        }                                                               \
         errno = 0;                                                      \
         op_ret = posix_istat (this, loc->gfid, NULL, iatt_p);           \
         if (errno != ELOOP) {                                           \
@@ -81,11 +86,6 @@
                 break;                                                  \
         }                                                               \
         /* __ret == -1 && errno == ELOOP */                             \
-        if (LOC_HAS_ABSPATH (loc)) {                                    \
-                MAKE_REAL_PATH (rpath, this, loc->path);                \
-                op_ret = posix_pstat (this, loc->gfid, rpath, iatt_p);  \
-                break;                                                  \
-        }                                                               \
         } while (0)
 
 
@@ -98,6 +98,13 @@
                 break;                                                  \
         }                                                               \
                                                                         \
+        if (LOC_HAS_ABSPATH (loc)) {                                    \
+                MAKE_REAL_PATH (entp, this, loc->path);                 \
+                __parp = strdupa (entp);                                \
+                parp = dirname (__parp);                                \
+                op_ret = posix_pstat (this, NULL, entp, ent_p);         \
+                break;                                                  \
+        }                                                               \
         errno = 0;                                                      \
         op_ret = posix_istat (this, loc->pargfid, loc->name, ent_p);    \
         if (errno != ELOOP) {                                           \
@@ -106,13 +113,6 @@
                 break;                                                  \
         }                                                               \
         /* __ret == -1 && errno == ELOOP */                             \
-        if (LOC_HAS_ABSPATH (loc)) {                                    \
-                MAKE_REAL_PATH (entp, this, loc->path);                 \
-                __parp = strdupa (entp);                                \
-                parp = dirname (__parp);                                \
-                op_ret = posix_pstat (this, NULL, entp, ent_p);         \
-                break;                                                  \
-        }                                                               \
         /* expand ELOOP */                                              \
         } while (0)
 
@@ -144,5 +144,8 @@ posix_handle_unset (xlator_t *this, uuid_t gfid, const char *basename);
 int posix_handle_mkdir_hashes (xlator_t *this, const char *newpath);
 
 int posix_handle_init (xlator_t *this);
+
+int posix_create_link_if_gfid_exists (xlator_t *this, uuid_t gfid,
+                                      char *real_path);
 
 #endif /* !_POSIX_HANDLE_H */

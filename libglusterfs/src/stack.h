@@ -155,7 +155,7 @@ FRAME_DESTROY (call_frame_t *frame)
         mem_put (frame);
 
         if (local)
-                GF_FREE (local);
+                mem_put (local);
 }
 
 
@@ -177,6 +177,7 @@ STACK_DESTROY (call_stack_t *stack)
         }
 
         LOCK_DESTROY (&stack->frames.lock);
+        LOCK_DESTROY (&stack->stack_lock);
 
         while (stack->frames.next) {
                 FRAME_DESTROY (stack->frames.next);
@@ -184,9 +185,26 @@ STACK_DESTROY (call_stack_t *stack)
         mem_put (stack);
 
         if (local)
-                GF_FREE (local);
+                mem_put (local);
 }
 
+static inline void
+STACK_RESET (call_stack_t *stack)
+{
+        void *local = NULL;
+
+        if (stack->frames.local) {
+                local = stack->frames.local;
+                stack->frames.local = NULL;
+        }
+
+        while (stack->frames.next) {
+                FRAME_DESTROY (stack->frames.next);
+        }
+
+        if (local)
+                mem_put (local);
+}
 
 #define cbk(x) cbk_##x
 

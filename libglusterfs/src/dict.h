@@ -35,12 +35,56 @@ typedef struct _data data_t;
 typedef struct _dict dict_t;
 typedef struct _data_pair data_pair_t;
 
+
+#define GF_PROTOCOL_DICT_SERIALIZE(this,from_dict,to,len,ope,labl) do { \
+                int    ret     = 0;                                     \
+                size_t dictlen = 0;                                     \
+                                                                        \
+                if (!from_dict)                                         \
+                        break;                                          \
+                                                                        \
+                ret = dict_allocate_and_serialize (from_dict, to,       \
+                                                   &dictlen);           \
+                if (ret < 0) {                                          \
+                        gf_log (this->name, GF_LOG_WARNING,             \
+                                "failed to get serialized dict (%s)",   \
+                                (#from_dict));                          \
+                        ope = EINVAL;                                   \
+                        goto labl;                                      \
+                }                                                       \
+                len = dictlen;                                          \
+        } while (0)
+
+
+#define GF_PROTOCOL_DICT_UNSERIALIZE(xl,to,buff,len,ret,ope,labl) do {  \
+                char *buf = NULL;                                       \
+                if (!len)                                               \
+                        break;                                          \
+                to = dict_new();                                        \
+                GF_VALIDATE_OR_GOTO (xl->name, to, labl);               \
+                                                                        \
+                buf = memdup (buff, len);                               \
+                GF_VALIDATE_OR_GOTO (xl->name, buf, labl);              \
+                                                                        \
+                ret = dict_unserialize (buf, len, &to);                 \
+                if (ret < 0) {                                          \
+                        gf_log (xl->name, GF_LOG_WARNING,               \
+                                "failed to unserialize dictionary (%s)", \
+                                (#to));                                 \
+                                                                        \
+                        ope = EINVAL;                                   \
+                        GF_FREE (buf);                                  \
+                        goto labl;                                      \
+                }                                                       \
+                                                                        \
+                to->extra_free = buf;                                   \
+        } while (0)
+
 struct _data {
         unsigned char  is_static:1;
         unsigned char  is_const:1;
         unsigned char  is_stdalloc:1;
         int32_t        len;
-        struct iovec  *vec;
         char          *data;
         int32_t        refcount;
         gf_lock_t      lock;
@@ -80,9 +124,6 @@ int32_t dict_serialize (dict_t *dict, char *buf);
 int32_t dict_unserialize (char *buf, int32_t size, dict_t **fill);
 
 int32_t dict_allocate_and_serialize (dict_t *this, char **buf, size_t *length);
-
-int32_t dict_iovec_len (dict_t *dict);
-int32_t dict_to_iovec (dict_t *dict, struct iovec *vec, int32_t count);
 
 void dict_destroy (dict_t *dict);
 void dict_unref (dict_t *dict);
@@ -192,4 +233,7 @@ GF_MUST_CHECK int dict_get_str (dict_t *this, char *key, char **str);
 GF_MUST_CHECK int dict_get_str_boolean (dict_t *this, char *key, int default_val);
 GF_MUST_CHECK int dict_serialize_value_with_delim (dict_t *this, char *buf, int32_t *serz_len,
                                                     char delimiter);
+
+void dict_dump (dict_t *dict);
+
 #endif

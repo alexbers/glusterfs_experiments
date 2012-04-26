@@ -142,11 +142,12 @@ static struct argp_option gf_options[] = {
         {"debug", ARGP_DEBUG_KEY, 0, 0,
          "Run in debug mode.  This option sets --no-daemon, --log-level "
          "to DEBUG and --log-file to console"},
-        {"volume-name", ARGP_VOLUME_NAME_KEY, "VOLUME-NAME", 0,
-         "Volume name to be used for MOUNT-POINT [default: top most volume "
-         "in VOLFILE]"},
-        {"xlator-option", ARGP_XLATOR_OPTION_KEY,"VOLUME-NAME.OPTION=VALUE", 0,
-         "Add/override a translator option for a volume with specified value"},
+        {"volume-name", ARGP_VOLUME_NAME_KEY, "XLATOR-NAME", 0,
+         "Translator name to be used for MOUNT-POINT [default: top most volume "
+         "definition in VOLFILE]"},
+        {"xlator-option", ARGP_XLATOR_OPTION_KEY,"XLATOR-NAME.OPTION=VALUE", 0,
+         "Add/override an option for a translator in volume file with specified"
+         " value"},
         {"read-only", ARGP_READ_ONLY_KEY, 0, 0,
          "Mount the filesystem in 'read-only' mode"},
         {"acl", ARGP_ACL_KEY, 0, 0,
@@ -184,6 +185,8 @@ static struct argp_option gf_options[] = {
          "Dump fuse traffic to PATH"},
         {"volfile-check", ARGP_VOLFILE_CHECK_KEY, 0, 0,
          "Enable strict volume file checking"},
+        {"mem-accounting", ARGP_MEM_ACCOUNTING_KEY, 0, OPTION_HIDDEN,
+         "Enable internal memory accounting"},
         {0, 0, 0, 0, "Miscellaneous Options:"},
         {0, }
 };
@@ -195,6 +198,7 @@ int glusterfs_pidfile_cleanup (glusterfs_ctx_t *ctx);
 int glusterfs_volumes_init (glusterfs_ctx_t *ctx);
 int glusterfs_mgmt_init (glusterfs_ctx_t *ctx);
 int glusterfs_listener_init (glusterfs_ctx_t *ctx);
+int glusterfs_listener_stop (glusterfs_ctx_t *ctx);
 
 int
 create_fuse_mount (glusterfs_ctx_t *ctx)
@@ -500,6 +504,7 @@ out:
 static error_t
 parse_opts (int key, char *arg, struct argp_state *state)
 {
+        glusterfs_ctx_t *ctx        = NULL;
         cmd_args_t   *cmd_args      = NULL;
         uint32_t      n             = 0;
         double        d             = 0.0;
@@ -762,6 +767,12 @@ parse_opts (int key, char *arg, struct argp_state *state)
                 argp_failure (state, -1, 0,
                               "unknown brick (listen) port %s", arg);
                 break;
+
+        case ARGP_MEM_ACCOUNTING_KEY:
+                /* TODO: it should have got handled much earlier */
+                ctx = glusterfs_ctx_get ();
+                ctx->mem_accounting = 1;
+                break;
         }
 
         return 0;
@@ -788,7 +799,7 @@ cleanup_and_exit (int signum)
         ctx->cleanup_started = 1;
         glusterfs_mgmt_pmap_signout (ctx);
         if (ctx->listener) {
-                ctx->listener = NULL;
+                (void) glusterfs_listener_stop (ctx);
         }
 
         /* Call fini() of FUSE xlator first:
@@ -805,8 +816,11 @@ cleanup_and_exit (int signum)
         exit (0);
 #if 0
         /* TODO: Properly do cleanup_and_exit(), with synchronization */
-        if (ctx->mgmt)
+        if (ctx->mgmt) {
+                /* cleanup the saved-frames before last unref */
+                rpc_clnt_connection_cleanup (&ctx->mgmt->conn);
                 rpc_clnt_unref (ctx->mgmt);
+        }
 
         /* call fini() of each xlator */
         trav = NULL;
@@ -838,9 +852,8 @@ reincarnate (int signum)
                         "Fetching the volume file from server...");
                 ret = glusterfs_volfile_fetch (ctx);
         } else {
-                gf_log ("glusterfsd", GF_LOG_INFO,
-                        "Reloading volfile ...");
-                ret = glusterfs_volumes_init (ctx);
+                gf_log ("glusterfsd", GF_LOG_DEBUG,
+                        "Not reloading volume specification file on SIGHUP");
         }
 
         /* Also, SIGHUP should do logrotate */
@@ -1009,17 +1022,15 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
                 return -1;
         }
 
-        /* frame_mem_pool size 112 * 16k */
-        pool->frame_mem_pool = mem_pool_new (call_frame_t, 16384);
-
+        /* frame_mem_pool size 112 * 4k */
+        pool->frame_mem_pool = mem_pool_new (call_frame_t, 4096);
         if (!pool->frame_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs frame pool creation failed");
                 return -1;
         }
-        /* stack_mem_pool size 256 * 8k */
-        pool->stack_mem_pool = mem_pool_new (call_stack_t, 8192);
-
+        /* stack_mem_pool size 256 * 1024 */
+        pool->stack_mem_pool = mem_pool_new (call_stack_t, 1024);
         if (!pool->stack_mem_pool) {
                 gf_log ("", GF_LOG_CRITICAL,
                         "ERROR: glusterfs stack pool creation failed");
@@ -1032,6 +1043,19 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
                         "ERROR: glusterfs stub pool creation failed");
                 return -1;
         }
+
+        ctx->dict_pool = mem_pool_new (dict_t, GF_MEMPOOL_COUNT_OF_DICT_T);
+        if (!ctx->dict_pool)
+                return -1;
+
+        ctx->dict_pair_pool = mem_pool_new (data_pair_t,
+                                            GF_MEMPOOL_COUNT_OF_DATA_PAIR_T);
+        if (!ctx->dict_pair_pool)
+                return -1;
+
+        ctx->dict_data_pool = mem_pool_new (data_t, GF_MEMPOOL_COUNT_OF_DATA_T);
+        if (!ctx->dict_data_pool)
+                return -1;
 
         INIT_LIST_HEAD (&pool->all_frames);
         LOCK_INIT (&pool->lock);
@@ -1092,6 +1116,17 @@ logging_init (glusterfs_ctx_t *ctx)
         return 0;
 }
 
+void
+gf_check_and_set_mem_acct (int argc, char *argv[], glusterfs_ctx_t *ctx)
+{
+        int i = 0;
+        for (i = 0; i < argc; i++) {
+                if (strcmp (argv[i], "--mem-accounting") == 0) {
+                        ctx->mem_accounting = 1;
+                        break;
+                }
+        }
+}
 
 int
 parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
@@ -1138,6 +1173,19 @@ parse_cmdline (int argc, char *argv[], glusterfs_ctx_t *ctx)
                         cmd_args->volfile = gf_strdup (DEFAULT_GLUSTERD_VOLFILE);
                 else
                         cmd_args->volfile = gf_strdup (DEFAULT_CLIENT_VOLFILE);
+
+                /* Check if the volfile exists, if not give usage output
+                   and exit */
+                ret = stat (cmd_args->volfile, &stbuf);
+                if (ret) {
+                        gf_log ("glusterfs", GF_LOG_CRITICAL,
+                                "ERROR: parsing the volfile failed (%s)\n",
+                                strerror (errno));
+                        /* argp_usage (argp.) */
+                        fprintf (stderr, "USAGE: %s [options] [mountpoint]\n",
+                                 argv[0]);
+                        goto out;
+                }
         }
 
         if (cmd_args->run_id) {
@@ -1559,7 +1607,10 @@ main (int argc, char *argv[])
                         "ERROR: glusterfs context not initialized");
                 return ENOMEM;
         }
-
+#ifndef DEBUG
+        /* Enable memory accounting on the fly based on argument */
+        gf_check_and_set_mem_acct (argc, argv, ctx);
+#endif
         ret = glusterfs_ctx_defaults_init (ctx);
         if (ret)
                 goto out;

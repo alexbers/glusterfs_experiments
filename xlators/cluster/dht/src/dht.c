@@ -144,7 +144,10 @@ dht_priv_dump (xlator_t *this)
                                    conf->du_stats->avail_inodes);
                 gf_proc_dump_write("du_stats.log", "%lu", conf->du_stats->log);
         }
-        gf_proc_dump_write("last_stat_fetch", "%s", ctime(&conf->last_stat_fetch.tv_sec));
+
+        if (conf->last_stat_fetch.tv_sec)
+                gf_proc_dump_write("last_stat_fetch", "%s",
+                                    ctime(&conf->last_stat_fetch.tv_sec));
 
         UNLOCK(&conf->subvolume_lock);
 
@@ -182,11 +185,20 @@ out:
 int
 notify (xlator_t *this, int event, void *data, ...)
 {
-        int ret = -1;
+        int              ret = -1;
+        va_list          ap;
+        dict_t          *output = NULL;
 
         GF_VALIDATE_OR_GOTO ("dht", this, out);
 
-        ret = dht_notify (this, event, data);
+
+        if (!data)
+                goto out;
+
+        va_start (ap, data);
+        output = va_arg (ap, dict_t*);
+
+        ret = dht_notify (this, event, data, output);
 
 out:
         return ret;
@@ -275,6 +287,7 @@ dht_parse_decommissioned_bricks (xlator_t *this, dht_conf_t *conf,
         }
 
         ret = 0;
+        conf->decommission_in_progress = 1;
 out:
         if (dup_brick)
                 GF_FREE (dup_brick);
@@ -343,10 +356,14 @@ out:
 int
 init (xlator_t *this)
 {
-        dht_conf_t    *conf = NULL;
-        char          *temp_str = NULL;
-        int            ret = -1;
-        int            i = 0;
+        dht_conf_t                      *conf           = NULL;
+        char                            *temp_str       = NULL;
+        int                              ret            = -1;
+        int                              i              = 0;
+        gf_defrag_info_t                *defrag         = NULL;
+        int                              cmd            = 0;
+        char                            *node_uuid      = NULL;
+
 
         GF_VALIDATE_OR_GOTO ("dht", this, err);
 
@@ -365,6 +382,37 @@ init (xlator_t *this)
         if (!conf) {
                 goto err;
         }
+
+        ret = dict_get_int32 (this->options, "rebalance-cmd", &cmd);
+
+        if (cmd) {
+                defrag = GF_CALLOC (1, sizeof (gf_defrag_info_t),
+                                    gf_defrag_info_mt);
+
+                GF_VALIDATE_OR_GOTO (this->name, defrag, err);
+
+                LOCK_INIT (&defrag->lock);
+
+                defrag->is_exiting = 0;
+
+                ret = dict_get_str (this->options, "node-uuid", &node_uuid);
+                if (ret) {
+                        gf_log (this->name, GF_LOG_ERROR, "node-uuid not "
+                                "specified");
+                        goto err;
+                }
+
+                if (uuid_parse (node_uuid, defrag->node_uuid)) {
+                        gf_log (this->name, GF_LOG_ERROR, "Cannot parse "
+                                "glusterd node uuid");
+                        goto err;
+                }
+
+                defrag->cmd = cmd;
+
+                conf->defrag = defrag;
+        }
+
 
         conf->search_unhashed = GF_DHT_LOOKUP_UNHASHED_ON;
         if (dict_get_str (this->options, "lookup-unhashed", &temp_str) == 0) {
@@ -420,6 +468,13 @@ init (xlator_t *this)
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to create sync environment %s",
                         strerror (errno));
+                goto err;
+        }
+
+        this->local_pool = mem_pool_new (dht_local_t, 512);
+        if (!this->local_pool) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
                 goto err;
         }
 
@@ -550,5 +605,12 @@ struct volume_options options[] = {
         { .key  = {"decommissioned-bricks"},
           .type = GF_OPTION_TYPE_ANY,
         },
+        { .key  = {"rebalance-cmd"},
+          .type = GF_OPTION_TYPE_INT,
+        },
+        { .key = {"node-uuid"},
+          .type = GF_OPTION_TYPE_STR,
+        },
+
         { .key  = {NULL} },
 };

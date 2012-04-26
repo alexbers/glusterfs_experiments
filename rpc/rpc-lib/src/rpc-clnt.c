@@ -23,7 +23,7 @@
 #include "config.h"
 #endif
 
-#define RPC_CLNT_DEFAULT_REQUEST_COUNT 4096
+#define RPC_CLNT_DEFAULT_REQUEST_COUNT 512
 
 #include "rpc-clnt.h"
 #include "byte-order.h"
@@ -373,12 +373,13 @@ saved_frames_unwind (struct saved_frames *saved_frames)
                 gf_log_callingfn (trav->rpcreq->conn->trans->name,
                                   GF_LOG_ERROR,
                                   "forced unwinding frame type(%s) op(%s(%d)) "
-                                  "called at %s",
+                                  "called at %s (xid=0x%ux)",
                                   trav->rpcreq->prog->progname,
                                   ((trav->rpcreq->prog->procnames) ?
                                    trav->rpcreq->prog->procnames[trav->rpcreq->procnum]
                                    : "--"),
-                                  trav->rpcreq->procnum, timestr);
+                                  trav->rpcreq->procnum, timestr,
+                                  trav->rpcreq->xid);
 		saved_frames->count--;
 
                 clnt = rpc_clnt_ref (trav->rpcreq->conn->rpc_clnt);
@@ -554,6 +555,12 @@ rpc_clnt_connection_cleanup (rpc_clnt_connection_t *conn)
                 }
 
                 conn->connected = 0;
+
+                if (conn->ping_timer) {
+                        gf_timer_call_cancel (clnt->ctx, conn->ping_timer);
+                        conn->ping_timer = NULL;
+                        conn->ping_started = 0;
+                }
         }
         pthread_mutex_unlock (&conn->lock);
 
@@ -838,17 +845,16 @@ out:
         return;
 }
 
-
 int
 rpc_clnt_notify (rpc_transport_t *trans, void *mydata,
                  rpc_transport_event_t event, void *data, ...)
 {
-        rpc_clnt_connection_t  *conn     = NULL;
-        struct rpc_clnt        *clnt     = NULL;
-        int                     ret      = -1;
-        rpc_request_info_t     *req_info = NULL;
-        rpc_transport_pollin_t *pollin   = NULL;
-        struct timeval          tv       = {0, };
+        rpc_clnt_connection_t  *conn        = NULL;
+        struct rpc_clnt        *clnt        = NULL;
+        int                     ret         = -1;
+        rpc_request_info_t     *req_info    = NULL;
+        rpc_transport_pollin_t *pollin      = NULL;
+        struct timeval          tv          = {0, };
 
         conn = mydata;
         if (conn == NULL) {
@@ -865,7 +871,8 @@ rpc_clnt_notify (rpc_transport_t *trans, void *mydata,
 
                 pthread_mutex_lock (&conn->lock);
                 {
-                        if (conn->reconnect == NULL) {
+                        if (!conn->rpc_clnt->disabled
+                            && (conn->reconnect == NULL)) {
                                 tv.tv_sec = 10;
 
                                 conn->reconnect =
@@ -1012,8 +1019,8 @@ out:
 }
 
 struct rpc_clnt *
-rpc_clnt_new (dict_t *options,
-              glusterfs_ctx_t *ctx, char *name)
+rpc_clnt_new (dict_t *options, glusterfs_ctx_t *ctx, char *name,
+              uint32_t reqpool_size)
 {
         int                    ret  = -1;
         struct rpc_clnt       *rpc  = NULL;
@@ -1026,8 +1033,10 @@ rpc_clnt_new (dict_t *options,
         pthread_mutex_init (&rpc->lock, NULL);
         rpc->ctx = ctx;
 
-        rpc->reqpool = mem_pool_new (struct rpc_req,
-                                     RPC_CLNT_DEFAULT_REQUEST_COUNT);
+        if (!reqpool_size)
+                reqpool_size = RPC_CLNT_DEFAULT_REQUEST_COUNT;
+
+        rpc->reqpool = mem_pool_new (struct rpc_req, reqpool_size);
         if (rpc->reqpool == NULL) {
                 pthread_mutex_destroy (&rpc->lock);
                 GF_FREE (rpc);
@@ -1036,7 +1045,7 @@ rpc_clnt_new (dict_t *options,
         }
 
         rpc->saved_frames_pool = mem_pool_new (struct saved_frame,
-                                              RPC_CLNT_DEFAULT_REQUEST_COUNT);
+                                               reqpool_size);
         if (rpc->saved_frames_pool == NULL) {
                 pthread_mutex_destroy (&rpc->lock);
                 mem_pool_destroy (rpc->reqpool);
@@ -1056,6 +1065,8 @@ rpc_clnt_new (dict_t *options,
                         dict_unref (options);
                 goto out;
         }
+
+        rpc->auth_null = dict_get_str_boolean (options, "auth-null", 0);
 
         rpc = rpc_clnt_ref (rpc);
         INIT_LIST_HEAD (&rpc->programs);
@@ -1117,7 +1128,7 @@ ret:
 
 
 int
-rpc_clnt_fill_request (int prognum, int progver, int procnum, int payload,
+rpc_clnt_fill_request (int prognum, int progver, int procnum,
                        uint64_t xid, struct auth_glusterfs_parms_v2 *au,
                        struct rpc_msg *request, char *auth_data)
 {
@@ -1137,19 +1148,26 @@ rpc_clnt_fill_request (int prognum, int progver, int procnum, int payload,
         request->rm_call.cb_vers = progver;
         request->rm_call.cb_proc = procnum;
 
-        /* TODO: Using AUTH_GLUSTERFS for time-being. Make it modular in
-         * future so it is easy to plug-in new authentication schemes.
+        /* TODO: Using AUTH_(GLUSTERFS/NULL) in a kludgy way for time-being.
+         * Make it modular in future so it is easy to plug-in new
+         * authentication schemes.
          */
-        ret = xdr_serialize_glusterfs_auth (auth_data, au);
-        if (ret == -1) {
-                gf_log ("rpc-clnt", GF_LOG_DEBUG, "cannot encode credentials");
-                goto out;
+        if (auth_data) {
+                ret = xdr_serialize_glusterfs_auth (auth_data, au);
+                if (ret == -1) {
+                        gf_log ("rpc-clnt", GF_LOG_DEBUG,
+                                "cannot encode credentials");
+                        goto out;
+                }
+
+                request->rm_call.cb_cred.oa_flavor = AUTH_GLUSTERFS_v2;
+                request->rm_call.cb_cred.oa_base   = auth_data;
+                request->rm_call.cb_cred.oa_length = ret;
+        } else {
+                request->rm_call.cb_cred.oa_flavor = AUTH_NULL;
+                request->rm_call.cb_cred.oa_base   = NULL;
+                request->rm_call.cb_cred.oa_length = 0;
         }
-
-        request->rm_call.cb_cred.oa_flavor = AUTH_GLUSTERFS_v2;
-        request->rm_call.cb_cred.oa_base   = auth_data;
-        request->rm_call.cb_cred.oa_length = ret;
-
         request->rm_call.cb_verf.oa_flavor = AUTH_NONE;
         request->rm_call.cb_verf.oa_base = NULL;
         request->rm_call.cb_verf.oa_length = 0;
@@ -1197,7 +1215,7 @@ out:
 
 struct iobuf *
 rpc_clnt_record_build_record (struct rpc_clnt *clnt, int prognum, int progver,
-                              int procnum, size_t payload, uint64_t xid,
+                              int procnum, size_t hdrsize, uint64_t xid,
                               struct auth_glusterfs_parms_v2 *au,
                               struct iovec *recbuf)
 {
@@ -1207,16 +1225,33 @@ rpc_clnt_record_build_record (struct rpc_clnt *clnt, int prognum, int progver,
         struct iovec    recordhdr                    = {0, };
         size_t          pagesize                     = 0;
         int             ret                          = -1;
+        size_t          xdr_size                     = 0;
         char            auth_data[GF_MAX_AUTH_BYTES] = {0, };
 
         if ((!clnt) || (!recbuf) || (!au)) {
                 goto out;
         }
 
+        /* Fill the rpc structure and XDR it into the buffer got above. */
+        if (clnt->auth_null)
+                ret = rpc_clnt_fill_request (prognum, progver, procnum,
+                                             xid, NULL, &request, NULL);
+        else
+                ret = rpc_clnt_fill_request (prognum, progver, procnum,
+                                             xid, au, &request, auth_data);
+
+        if (ret == -1) {
+                gf_log (clnt->conn.trans->name, GF_LOG_WARNING,
+                        "cannot build a rpc-request xid (%"PRIu64")", xid);
+                goto out;
+        }
+
+        xdr_size = xdr_sizeof ((xdrproc_t)xdr_callmsg, &request);
+
         /* First, try to get a pointer into the buffer which the RPC
          * layer can use.
          */
-        request_iob = iobuf_get (clnt->ctx->iobuf_pool);
+        request_iob = iobuf_get2 (clnt->ctx->iobuf_pool, (xdr_size + hdrsize));
         if (!request_iob) {
                 goto out;
         }
@@ -1225,17 +1260,8 @@ rpc_clnt_record_build_record (struct rpc_clnt *clnt, int prognum, int progver,
 
         record = iobuf_ptr (request_iob);  /* Now we have it. */
 
-        /* Fill the rpc structure and XDR it into the buffer got above. */
-        ret = rpc_clnt_fill_request (prognum, progver, procnum, payload, xid,
-                                     au, &request, auth_data);
-        if (ret == -1) {
-                gf_log (clnt->conn.trans->name, GF_LOG_WARNING,
-                        "cannot build a rpc-request xid (%"PRIu64")", xid);
-                goto out;
-        }
-
         recordhdr = rpc_clnt_record_build_header (record, pagesize, &request,
-                                                  payload);
+                                                  hdrsize);
 
         if (!recordhdr.iov_base) {
                 gf_log (clnt->conn.trans->name, GF_LOG_ERROR,
@@ -1256,7 +1282,7 @@ out:
 
 struct iobuf *
 rpc_clnt_record (struct rpc_clnt *clnt, call_frame_t *call_frame,
-                 rpc_clnt_prog_t *prog,int procnum, size_t payload_len,
+                 rpc_clnt_prog_t *prog, int procnum, size_t hdrlen,
                  struct iovec *rpchdr, uint64_t callid)
 {
         struct auth_glusterfs_parms_v2  au          = {0, };
@@ -1292,12 +1318,9 @@ rpc_clnt_record (struct rpc_clnt *clnt, call_frame_t *call_frame,
                 ", gid: %d, owner: %s", au.pid, au.uid, au.gid,
                 lkowner_utoa (&call_frame->root->lk_owner));
 
-        /* Assuming the client program would like to speak to the same version of
-         * program on server.
-         */
         request_iob = rpc_clnt_record_build_record (clnt, prog->prognum,
                                                     prog->progver,
-                                                    procnum, payload_len,
+                                                    procnum, hdrlen,
                                                     callid, &au,
                                                     rpchdr);
         if (!request_iob) {
@@ -1399,6 +1422,12 @@ rpc_clnt_submit (struct rpc_clnt *rpc, rpc_clnt_prog_t *prog,
                 goto out;
         }
 
+        conn = &rpc->conn;
+
+        if (conn->trans == NULL) {
+                goto out;
+        }
+
         rpcreq = mem_get (rpc->reqpool);
         if (rpcreq == NULL) {
                 goto out;
@@ -1418,8 +1447,6 @@ rpc_clnt_submit (struct rpc_clnt *rpc, rpc_clnt_prog_t *prog,
 
         callid = rpc_clnt_new_callid (rpc);
 
-        conn = &rpc->conn;
-
         rpcreq->prog = prog;
         rpcreq->procnum = procnum;
         rpcreq->conn = conn;
@@ -1430,11 +1457,6 @@ rpc_clnt_submit (struct rpc_clnt *rpc, rpc_clnt_prog_t *prog,
 
         if (proghdr) {
                 proglen += iov_length (proghdr, proghdrcount);
-        }
-
-        if (progpayload) {
-                proglen += iov_length (progpayload,
-                                       progpayloadcount);
         }
 
         request_iob = rpc_clnt_record (rpc, frame, prog,
@@ -1546,12 +1568,11 @@ rpc_clnt_destroy (struct rpc_clnt *rpc)
                 return;
 
         if (rpc->conn.trans) {
-                rpc->conn.trans->mydata = NULL;
+                rpc_transport_unregister_notify (rpc->conn.trans);
+                rpc_transport_disconnect (rpc->conn.trans);
                 rpc_transport_unref (rpc->conn.trans);
-                //rpc_transport_destroy (rpc->conn.trans);
         }
 
-        rpc_clnt_connection_cleanup (&rpc->conn);
         rpc_clnt_reconnect_cleanup (&rpc->conn);
         saved_frames_destroy (rpc->conn.saved_frames);
         pthread_mutex_destroy (&rpc->lock);
@@ -1583,6 +1604,48 @@ rpc_clnt_unref (struct rpc_clnt *rpc)
                 return NULL;
         }
         return rpc;
+}
+
+
+void
+rpc_clnt_disable (struct rpc_clnt *rpc)
+{
+        rpc_clnt_connection_t *conn = NULL;
+
+        if (!rpc) {
+                goto out;
+        }
+
+        conn = &rpc->conn;
+
+        pthread_mutex_lock (&conn->lock);
+        {
+                rpc->disabled = 1;
+
+                if (conn->timer) {
+                        gf_timer_call_cancel (rpc->ctx, conn->timer);
+                        conn->timer = NULL;
+                }
+
+                if (conn->reconnect) {
+                        gf_timer_call_cancel (rpc->ctx, conn->reconnect);
+                        conn->reconnect = NULL;
+                }
+                conn->connected = 0;
+
+                if (conn->ping_timer) {
+                        gf_timer_call_cancel (rpc->ctx, conn->ping_timer);
+                        conn->ping_timer = NULL;
+                        conn->ping_started = 0;
+                }
+
+        }
+        pthread_mutex_unlock (&conn->lock);
+
+        rpc_transport_disconnect (rpc->conn.trans);
+
+out:
+        return;
 }
 
 

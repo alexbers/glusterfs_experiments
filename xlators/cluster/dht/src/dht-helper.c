@@ -229,7 +229,7 @@ dht_local_wipe (xlator_t *this, dht_local_t *local)
         if (local->rebalance.iobref)
                 iobref_unref (local->rebalance.iobref);
 
-        GF_FREE (local);
+        mem_put (local);
 }
 
 
@@ -240,8 +240,7 @@ dht_local_init (call_frame_t *frame, loc_t *loc, fd_t *fd, glusterfs_fop_t fop)
         inode_t     *inode = NULL;
         int          ret   = 0;
 
-        /* TODO: use mem-pool */
-        local = GF_CALLOC (1, sizeof (*local), gf_dht_mt_dht_local_t);
+        local = mem_get0 (THIS->local_pool);
         if (!local)
                 goto out;
 
@@ -274,7 +273,7 @@ dht_local_init (call_frame_t *frame, loc_t *loc, fd_t *fd, glusterfs_fop_t fop)
 out:
         if (ret) {
                 if (local)
-                        GF_FREE (local);
+                        mem_put (local);
                 local = NULL;
         }
         return local;
@@ -358,10 +357,16 @@ dht_subvol_get_hashed (xlator_t *this, loc_t *loc)
         dht_layout_t *layout = NULL;
         xlator_t     *subvol = NULL;
 
-        if (is_fs_root (loc)) {
+        GF_VALIDATE_OR_GOTO ("dht", this, out);
+        GF_VALIDATE_OR_GOTO (this->name, loc, out);
+
+        if (__is_root_gfid (loc->gfid)) {
                 subvol = dht_first_up_subvol (this);
                 goto out;
         }
+
+        GF_VALIDATE_OR_GOTO (this->name, loc->parent, out);
+        GF_VALIDATE_OR_GOTO (this->name, loc->name, out);
 
         layout = dht_layout_get (this, loc->parent);
 
@@ -396,6 +401,8 @@ dht_subvol_get_cached (xlator_t *this, inode_t *inode)
         dht_layout_t *layout = NULL;
         xlator_t     *subvol = NULL;
 
+        GF_VALIDATE_OR_GOTO (this->name, this, out);
+        GF_VALIDATE_OR_GOTO (this->name, inode, out);
 
         layout = dht_layout_get (this, inode);
 

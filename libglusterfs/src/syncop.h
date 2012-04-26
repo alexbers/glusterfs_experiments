@@ -30,8 +30,11 @@
 #include <pthread.h>
 #include <ucontext.h>
 
+#define SYNCENV_PROC_MAX 16
+#define SYNCENV_PROC_MIN 2
 
 struct synctask;
+struct syncproc;
 struct syncenv;
 
 
@@ -40,33 +43,58 @@ typedef int (*synctask_cbk_t) (int ret, call_frame_t *frame, void *opaque);
 typedef int (*synctask_fn_t) (void *opaque);
 
 
+typedef enum {
+	SYNCTASK_INIT = 0,
+	SYNCTASK_RUN,
+	SYNCTASK_WAIT,
+	SYNCTASK_DONE,
+} synctask_state_t;
+
 /* for one sequential execution of @syncfn */
 struct synctask {
         struct list_head    all_tasks;
         struct syncenv     *env;
         xlator_t           *xl;
         call_frame_t       *frame;
+        call_frame_t       *opframe;
         synctask_cbk_t      synccbk;
         synctask_fn_t       syncfn;
+	synctask_state_t    state;
         void               *opaque;
         void               *stack;
-        int                 complete;
+        int                 woken;
+        int                 slept;
+	int                 ret;
 
         ucontext_t          ctx;
+	struct syncproc    *proc;
+
+	pthread_mutex_t     mutex; /* for synchronous spawning of synctask */
+	pthread_cond_t      cond;
+	int                 done;
+};
+
+
+struct syncproc {
+        pthread_t           processor;
+        ucontext_t          sched;
+        struct syncenv     *env;
+        struct synctask    *current;
 };
 
 /* hosts the scheduler thread and framework for executing synctasks */
 struct syncenv {
-        pthread_t           processor;
-        struct synctask    *current;
+        struct syncproc     proc[SYNCENV_PROC_MAX];
+        int                 procs;
 
         struct list_head    runq;
+        int                 runcount;
         struct list_head    waitq;
+        int                 waitcount;
 
         pthread_mutex_t     mutex;
         pthread_cond_t      cond;
 
-        ucontext_t          sched;
         size_t              stacksize;
 };
 
@@ -83,69 +111,30 @@ struct syncargs {
         int                 count;
         struct iobref      *iobref;
         char               *buffer;
+        dict_t             *xdata;
+
+        /* some more _cbk needs */
+        uuid_t              uuid;
+        char               *errstr;
+        dict_t             *dict;
 
         /* do not touch */
-        pthread_mutex_t     mutex;
-        char                complete;
-        pthread_cond_t      cond;
         struct synctask    *task;
 };
 
-
-#define __yawn(args) do {                                               \
-                struct synctask *task = NULL;                           \
-                                                                        \
-                task = synctask_get ();                                 \
-                if (task) {                                             \
-                        args->task = task;                              \
-                        synctask_yawn (task);                           \
-                } else {                                                \
-                        pthread_mutex_init (&args->mutex, NULL);        \
-                        pthread_cond_init (&args->cond, NULL);          \
-                }                                                       \
-        } while (0)
-
-
-#define __yield(args) do {                                              \
-                if (args->task) {                                       \
-                        synctask_yield (args->task);                    \
-                } else {                                                \
-                        pthread_mutex_lock (&args->mutex);              \
-                        {                                               \
-                                while (!args->complete)                 \
-                                        pthread_cond_wait (&args->cond, \
-                                                           &args->mutex); \
-                        }                                               \
-                        pthread_mutex_unlock (&args->mutex);            \
-                                                                        \
-                        pthread_mutex_destroy (&args->mutex);           \
-                        pthread_cond_destroy (&args->cond);             \
-                }                                                       \
-        } while (0)
-
-
-#define __wake(args) do {                                               \
-                if (args->task) {                                       \
-                        synctask_wake (args->task);                     \
-                } else {                                                \
-                        pthread_mutex_lock (&args->mutex);              \
-                        {                                               \
-                                args->complete = 1;                     \
-                                pthread_cond_broadcast (&args->cond);   \
-                        }                                               \
-                        pthread_mutex_unlock (&args->mutex);            \
-                }                                                       \
-        } while (0)
+#define __wake(args) synctask_wake(args->task)
 
 
 #define SYNCOP(subvol, stb, cbk, op, params ...) do {                   \
-                call_frame_t    *frame = NULL;                          \
+                struct  synctask        *task = NULL;                   \
                                                                         \
-                frame = syncop_create_frame ();                         \
+                task = synctask_get ();                                 \
+                stb->task = task;                                       \
                                                                         \
-                __yawn (stb);                                           \
-                STACK_WIND_COOKIE (frame, cbk, (void *)stb, subvol, op, params); \
-                __yield (stb);                                          \
+                STACK_WIND_COOKIE (task->opframe, cbk, (void *)stb,     \
+                                   subvol, op, params);                 \
+                synctask_yield (stb->task);                             \
+                STACK_RESET (task->opframe->root);                      \
         } while (0)
 
 
@@ -153,10 +142,9 @@ struct syncargs {
 
 struct syncenv * syncenv_new ();
 void syncenv_destroy (struct syncenv *);
+void syncenv_scale (struct syncenv *env);
 
 int synctask_new (struct syncenv *, synctask_fn_t, synctask_cbk_t, call_frame_t* frame, void *);
-void synctask_zzzz (struct synctask *task);
-void synctask_yawn (struct synctask *task);
 void synctask_wake (struct synctask *task);
 void synctask_yield (struct synctask *task);
 
@@ -168,6 +156,9 @@ int syncop_readdirp (xlator_t *subvol, fd_t *fd, size_t size, off_t off,
                      dict_t *dict,
                      /* out */
                      gf_dirent_t *entries);
+
+int syncop_readdir (xlator_t *subvol, fd_t *fd, size_t size, off_t off,
+                    gf_dirent_t *entries);
 
 int syncop_opendir (xlator_t *subvol, loc_t *loc, fd_t *fd);
 
@@ -195,10 +186,12 @@ int syncop_open (xlator_t *subvol, loc_t *loc, int32_t flags, fd_t *fd);
 int syncop_close (fd_t *fd);
 
 int syncop_write (xlator_t *subvol, fd_t *fd, const char *buf, int size,
-                  off_t offset, struct iobref *iobref);
+                  off_t offset, struct iobref *iobref, uint32_t flags);
 int syncop_writev (xlator_t *subvol, fd_t *fd, struct iovec *vector,
-                   int32_t count, off_t offset, struct iobref *iobref);
+                   int32_t count, off_t offset, struct iobref *iobref,
+                   uint32_t flags);
 int syncop_readv (xlator_t *subvol, fd_t *fd, size_t size, off_t off,
+                  uint32_t flags,
                   /* out */
                   struct iovec **vector, int *count, struct iobref **iobref);
 
@@ -215,5 +208,5 @@ int syncop_symlink (xlator_t *subvol, loc_t *loc, char *newpath, dict_t *dict);
 int syncop_readlink (xlator_t *subvol, loc_t *loc, char **buffer, size_t size);
 int syncop_mknod (xlator_t *subvol, loc_t *loc, mode_t mode, dev_t rdev,
                   dict_t *dict);
-
+int syncop_link (xlator_t *subvol, loc_t *oldloc, loc_t *newloc);
 #endif /* _SYNCOP_H */

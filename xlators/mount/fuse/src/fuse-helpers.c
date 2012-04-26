@@ -24,6 +24,9 @@
 #include <sys/sysctl.h>
 #endif
 
+#ifndef GF_REQUEST_MAXGROUPS
+#define GF_REQUEST_MAXGROUPS    16
+#endif /* GF_REQUEST_MAXGROUPS */
 
 static void
 fuse_resolve_wipe (fuse_resolve_t *resolve)
@@ -36,6 +39,9 @@ fuse_resolve_wipe (fuse_resolve_t *resolve)
 
         if (resolve->resolved)
                 GF_FREE ((void *)resolve->resolved);
+
+        if (resolve->fd)
+                fd_unref (resolve->fd);
 
         loc_wipe (&resolve->resolve_loc);
 
@@ -54,14 +60,26 @@ fuse_resolve_wipe (fuse_resolve_t *resolve)
 void
 free_fuse_state (fuse_state_t *state)
 {
+        xlator_t       *this     = NULL;
+        fuse_private_t *priv     = NULL;
+        uint64_t        winds    = 0;
+        char            switched = 0;
+
+        this = state->this;
+
+        priv = this->private;
+
         loc_wipe (&state->loc);
 
         loc_wipe (&state->loc2);
 
-        if (state->dict) {
-                dict_unref (state->dict);
-                state->dict = (void *)0xaaaaeeee;
+        if (state->xdata) {
+                dict_unref (state->xdata);
+                state->xdata = (void *)0xaaaaeeee;
         }
+        if (state->xattr)
+                dict_unref (state->xattr);
+
         if (state->name) {
                 GF_FREE (state->name);
                 state->name = NULL;
@@ -78,6 +96,18 @@ free_fuse_state (fuse_state_t *state)
         fuse_resolve_wipe (&state->resolve);
         fuse_resolve_wipe (&state->resolve2);
 
+        pthread_mutex_lock (&priv->sync_mutex);
+        {
+                winds = --state->active_subvol->winds;
+                switched = state->active_subvol->switched;
+        }
+        pthread_mutex_unlock (&priv->sync_mutex);
+
+        if ((winds == 0) && (switched)) {
+                xlator_notify (state->active_subvol, GF_EVENT_PARENT_DOWN,
+                               state->active_subvol, NULL);
+        }
+
 #ifdef DEBUG
         memset (state, 0x90, sizeof (*state));
 #endif
@@ -89,8 +119,9 @@ free_fuse_state (fuse_state_t *state)
 fuse_state_t *
 get_fuse_state (xlator_t *this, fuse_in_header_t *finh)
 {
-        fuse_state_t *state = NULL;
-	xlator_t     *active_subvol = NULL;
+        fuse_state_t   *state         = NULL;
+	xlator_t       *active_subvol = NULL;
+        fuse_private_t *priv          = NULL;
 
         state = (void *)GF_CALLOC (1, sizeof (*state),
                                    gf_fuse_mt_fuse_state_t);
@@ -98,7 +129,15 @@ get_fuse_state (xlator_t *this, fuse_in_header_t *finh)
                 return NULL;
 
 	state->this = THIS;
-        active_subvol = fuse_active_subvol (state->this);
+        priv = this->private;
+
+        pthread_mutex_lock (&priv->sync_mutex);
+        {
+                active_subvol = fuse_active_subvol (state->this);
+                active_subvol->winds++;
+        }
+        pthread_mutex_unlock (&priv->sync_mutex);
+
 	state->active_subvol = active_subvol;
 	state->itable = active_subvol->itable;
 
@@ -356,6 +395,10 @@ fuse_loc_fill (loc_t *loc, fuse_state_t *state, ino_t ino,
         }
         ret = 0;
 fail:
+        /* this should not happen as inode_path returns -1 when buf is NULL
+           for sure */
+        if (path && !loc->path)
+                GF_FREE (path);
         return ret;
 }
 
@@ -389,21 +432,24 @@ gf_fuse_stat2attr (struct iatt *st, struct fuse_attr *fa)
 #endif
 }
 
-int
-fuse_flip_user_to_trusted (char *okey, char **nkey)
+static int
+fuse_do_flip_xattr_ns (char *okey, const char *nns, char **nkey)
 {
         int   ret = 0;
         char *key = NULL;
 
-        key = GF_CALLOC (1, strlen(okey) + 10, gf_common_mt_char);
+        okey = strchr (okey, '.');
+        GF_ASSERT (okey);
+
+        key = GF_CALLOC (1, strlen (nns) + strlen(okey) + 1,
+                         gf_common_mt_char);
         if (!key) {
                 ret = -1;
                 goto out;
         }
 
-        okey += 5;
-        strncpy(key, "trusted.", 8);
-        strncat(key+8, okey, strlen(okey));
+        strcpy (key, nns);
+        strcat (key, okey);
 
         *nkey = key;
 
@@ -411,7 +457,7 @@ fuse_flip_user_to_trusted (char *okey, char **nkey)
         return ret;
 }
 
-int
+static int
 fuse_xattr_alloc_default (char *okey, char **nkey)
 {
         int ret = 0;
@@ -422,56 +468,43 @@ fuse_xattr_alloc_default (char *okey, char **nkey)
         return ret;
 }
 
+#define PRIV_XA_NS   "trusted"
+#define UNPRIV_XA_NS "system"
+
 int
 fuse_flip_xattr_ns (fuse_private_t *priv, char *okey, char **nkey)
 {
         int             ret       = 0;
         gf_boolean_t    need_flip = _gf_false;
-        gf_client_pid_t npid      = 0;
 
-        npid = priv->client_pid;
-        if (gf_client_pid_check (npid)) {
-                ret = fuse_xattr_alloc_default (okey, nkey);
-                goto out;
-        }
-
-        switch (npid) {
-                /*
-                 * These two cases will never execute as we check the
-                 * pid range above, but are kept to keep the compiler
-                 * happy.
-                 */
-        case GF_CLIENT_PID_MAX:
-        case GF_CLIENT_PID_MIN:
-                goto out;
-
+        switch (priv->client_pid) {
         case GF_CLIENT_PID_GSYNCD:
                 /* valid xattr(s): *xtime, volume-mark* */
                 gf_log("glusterfs-fuse", GF_LOG_DEBUG, "PID: %d, checking xattr(s): "
-                       "volume-mark*, *xtime", npid);
-                if ( (strcmp (okey, "user.glusterfs.volume-mark") == 0)
-                     || (fnmatch (okey, "user.glusterfs.volume-mark.*", FNM_PERIOD) == 0)
-                     || (fnmatch ("user.glusterfs.*.xtime", okey, FNM_PERIOD) == 0) )
+                       "volume-mark*, *xtime", priv->client_pid);
+                if ( (strcmp (okey, UNPRIV_XA_NS".glusterfs.volume-mark") == 0)
+                     || (fnmatch (UNPRIV_XA_NS".glusterfs.volume-mark.*", okey, FNM_PERIOD) == 0)
+                     || (fnmatch (UNPRIV_XA_NS".glusterfs.*.xtime", okey, FNM_PERIOD) == 0) )
                         need_flip = _gf_true;
                 break;
 
         case GF_CLIENT_PID_HADOOP:
                 /* valid xattr(s): pathinfo */
                 gf_log("glusterfs-fuse", GF_LOG_DEBUG, "PID: %d, checking xattr(s): "
-                       "pathinfo", npid);
-                if (strcmp (okey, "user.glusterfs.pathinfo") == 0)
+                       "pathinfo", priv->client_pid);
+                if (strcmp (okey, UNPRIV_XA_NS".glusterfs.pathinfo") == 0)
                         need_flip = _gf_true;
                 break;
         }
 
         if (need_flip) {
-                gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "flipping %s to trusted equivalent",
+                gf_log ("glusterfs-fuse", GF_LOG_DEBUG, "flipping %s to "PRIV_XA_NS" equivalent",
                         okey);
-                ret = fuse_flip_user_to_trusted (okey, nkey);
+                ret = fuse_do_flip_xattr_ns (okey, PRIV_XA_NS, nkey);
         } else {
                 /* if we cannot match, continue with what we got */
                 ret = fuse_xattr_alloc_default (okey, nkey);
         }
- out:
+
         return ret;
 }

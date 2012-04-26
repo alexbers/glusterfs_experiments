@@ -96,7 +96,7 @@ glusterd_store_mkstemp (glusterd_store_handle_t *shandle)
         GF_ASSERT (shandle->path);
 
         snprintf (tmppath, sizeof (tmppath), "%s.tmp", shandle->path);
-        fd = open (tmppath, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        fd = open (tmppath, O_RDWR | O_CREAT | O_TRUNC, 0600);
         if (fd <= 0) {
                 gf_log ("glusterd", GF_LOG_ERROR, "Failed to open %s, "
                         "error: %s", tmppath, strerror (errno));
@@ -566,6 +566,8 @@ void _storeopts (dict_t *this, char *key, data_t *value, void *data)
 int32_t
 glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
 {
+        char      *str   = NULL;
+
         GF_ASSERT (fd > 0);
         GF_ASSERT (volinfo);
 
@@ -621,6 +623,33 @@ glusterd_volume_exclude_options_write (int fd, glusterd_volinfo_t *volinfo)
                                          uuid_utoa (volinfo->volume_id));
         if (ret)
                 goto out;
+
+        if (volinfo->defrag_cmd == GF_DEFRAG_CMD_STATUS)
+                goto out;
+
+        snprintf (buf, sizeof (buf), "%d", volinfo->defrag_cmd);
+        ret = glusterd_store_save_value (fd, GLUSTERD_STORE_KEY_VOL_DEFRAG,
+                                        buf);
+        if (ret)
+                goto out;
+
+        str = glusterd_auth_get_username (volinfo);
+        if (str) {
+                ret = glusterd_store_save_value (fd,
+                                                 GLUSTERD_STORE_KEY_USERNAME,
+                                                 str);
+                if (ret)
+                goto out;
+        }
+
+        str = glusterd_auth_get_password (volinfo);
+        if (str) {
+                ret = glusterd_store_save_value (fd,
+                                                 GLUSTERD_STORE_KEY_PASSWORD,
+                                                 str);
+                if (ret)
+                        goto out;
+        }
 
 out:
         if (ret)
@@ -1048,12 +1077,17 @@ glusterd_store_retrieve_value (glusterd_store_handle_t *handle,
 
         handle->fd = open (handle->path, O_RDWR);
 
+        if (handle->fd == -1) {
+                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %s",
+                        handle->path, strerror (errno));
+                goto out;
+        }
         if (!handle->read)
                 handle->read = fdopen (handle->fd, "r");
 
         if (!handle->read) {
-                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %d",
-                        handle->path, errno);
+                gf_log ("", GF_LOG_ERROR, "Unable to open file %s errno: %s",
+                        handle->path, strerror (errno));
                 goto out;
         }
 
@@ -1165,7 +1199,7 @@ glusterd_store_handle_new (char *path, glusterd_store_handle_t **handle)
         if (!spath)
                 goto out;
 
-        fd = open (path, O_RDWR | O_CREAT | O_APPEND, 0644);
+        fd = open (path, O_RDWR | O_CREAT | O_APPEND, 0600);
         if (fd <= 0) {
                 gf_log ("glusterd", GF_LOG_ERROR, "Failed to open file: %s, "
                         "error: %s", path, strerror (errno));
@@ -1240,8 +1274,10 @@ glusterd_store_uuid ()
         char            path[PATH_MAX] = {0,};
         int32_t         ret = -1;
         glusterd_store_handle_t *handle = NULL;
+        xlator_t       *this    = NULL;
 
-        priv = THIS->private;
+        this = THIS;
+        priv = this->private;
 
         snprintf (path, PATH_MAX, "%s/%s", priv->workdir,
                   GLUSTERD_INFO_FILE);
@@ -1250,14 +1286,22 @@ glusterd_store_uuid ()
                 ret = glusterd_store_handle_new (path, &handle);
 
                 if (ret) {
-                        gf_log ("", GF_LOG_ERROR, "Unable to get store"
-                                " handle!");
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Unable to get store handle!");
                         goto out;
                 }
 
                 priv->handle = handle;
         } else {
                 handle = priv->handle;
+        }
+
+        /* make glusterd's uuid available for users */
+        ret = chmod (handle->path, 0644);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "chmod error for %s: %s",
+                        GLUSTERD_INFO_FILE, strerror (errno));
+                goto out;
         }
 
         handle->fd = open (handle->path, O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -1269,8 +1313,8 @@ glusterd_store_uuid ()
                                          uuid_utoa (priv->uuid));
 
         if (ret) {
-                gf_log ("", GF_LOG_CRITICAL, "Storing uuid failed"
-                        "ret = %d", ret);
+                gf_log (this->name, GF_LOG_CRITICAL,
+                        "Storing uuid failed ret = %d", ret);
                 goto out;
         }
 
@@ -1280,7 +1324,7 @@ out:
                 close (handle->fd);
                 handle->fd = 0;
         }
-        gf_log ("", GF_LOG_DEBUG, "Returning %d", ret);
+        gf_log (this->name, GF_LOG_DEBUG, "Returning %d", ret);
         return ret;
 }
 
@@ -1850,6 +1894,16 @@ glusterd_store_retrieve_volume (char    *volname)
                                 gf_log ("", GF_LOG_WARNING,
                                         "failed to parse uuid");
 
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_USERNAME,
+                                     strlen (GLUSTERD_STORE_KEY_USERNAME))) {
+
+                        glusterd_auth_set_username (volinfo, value);
+
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_PASSWORD,
+                                     strlen (GLUSTERD_STORE_KEY_PASSWORD))) {
+
+                        glusterd_auth_set_password (volinfo, value);
+
                 } else if (strstr (key, "slave")) {
                         ret = dict_set_dynstr (volinfo->gsync_slaves, key,
                                                 gf_strdup (value));
@@ -1860,6 +1914,9 @@ glusterd_store_retrieve_volume (char    *volname)
                         }
                         gf_log ("", GF_LOG_DEBUG, "Parsed as "GEOREP" "
                                 " slave:key=%s,value:%s", key, value);
+                } else if (!strncmp (key, GLUSTERD_STORE_KEY_VOL_DEFRAG,
+                                     strlen (GLUSTERD_STORE_KEY_VOL_DEFRAG))) {
+                        volinfo->defrag_cmd = atoi (value);
                 }
                 else {
                         exists = glusterd_check_option_exists (key, NULL);

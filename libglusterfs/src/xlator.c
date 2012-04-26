@@ -238,23 +238,23 @@ xlator_dynload (xlator_t *xl)
         }
 
         if (!(xl->notify = dlsym (handle, "notify"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(notify) on %s -- neglecting", dlerror ());
         }
 
         if (!(xl->dumpops = dlsym (handle, "dumpops"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(dumpops) on %s -- neglecting", dlerror ());
         }
 
         if (!(xl->mem_acct_init = dlsym (handle, "mem_acct_init"))) {
-                gf_log (xl->name, GF_LOG_DEBUG,
+                gf_log (xl->name, GF_LOG_TRACE,
                         "dlsym(mem_acct_init) on %s -- neglecting",
                         dlerror ());
         }
 
         if (!(xl->reconfigure = dlsym (handle, "reconfigure"))) {
-                gf_log ("xlator", GF_LOG_DEBUG,
+                gf_log ("xlator", GF_LOG_TRACE,
                         "dlsym(reconfigure) on %s -- neglecting",
                         dlerror());
         }
@@ -268,7 +268,7 @@ xlator_dynload (xlator_t *xl)
 
         if (!(vol_opt->given_opt = dlsym (handle, "options"))) {
                 dlerror ();
-                gf_log (xl->name, GF_LOG_DEBUG,
+                gf_log (xl->name, GF_LOG_TRACE,
                         "Strict option validation not enforced -- neglecting");
         }
         list_add_tail (&vol_opt->list, &xl->volume_options);
@@ -430,6 +430,9 @@ xlator_fini_rec (xlator_t *xl)
 
                         xl->fini (xl);
 
+                        if (xl->local_pool)
+                                mem_pool_destroy (xl->local_pool);
+
                         THIS = old_THIS;
                 } else {
                         gf_log (xl->name, GF_LOG_DEBUG, "No fini() found");
@@ -560,6 +563,7 @@ loc_copy (loc_t *dst, loc_t *src)
 
         uuid_copy (dst->gfid, src->gfid);
         uuid_copy (dst->pargfid, src->pargfid);
+        uuid_copy (dst->gfid, src->gfid);
 
         if (src->inode)
                 dst->inode = inode_ref (src->inode);
@@ -567,24 +571,22 @@ loc_copy (loc_t *dst, loc_t *src)
         if (src->parent)
                 dst->parent = inode_ref (src->parent);
 
-        dst->path = gf_strdup (src->path);
+        if (src->path) {
+                dst->path = gf_strdup (src->path);
 
-        if (!dst->path)
-                goto out;
+                if (!dst->path)
+                        goto out;
 
-        dst->name = strrchr (dst->path, '/');
-        if (dst->name)
-                dst->name++;
+                if (src->name)
+                        dst->name = strrchr (dst->path, '/');
+                if (dst->name)
+                        dst->name++;
+        }
 
         ret = 0;
 out:
-        if (ret == -1) {
-                if (dst->inode)
-                        inode_unref (dst->inode);
-
-                if (dst->parent)
-                        inode_unref (dst->parent);
-        }
+        if (ret == -1)
+                loc_wipe (dst);
 
 err:
         return ret;

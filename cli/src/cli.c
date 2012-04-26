@@ -164,20 +164,31 @@ glusterfs_ctx_defaults_init (glusterfs_ctx_t *ctx)
         if (!pool)
                 return -1;
 
-        /* frame_mem_pool size 112 * 16k */
-        pool->frame_mem_pool = mem_pool_new (call_frame_t, 16384);
-
+        /* frame_mem_pool size 112 * 64 */
+        pool->frame_mem_pool = mem_pool_new (call_frame_t, 32);
         if (!pool->frame_mem_pool)
                 return -1;
 
-        /* stack_mem_pool size 256 * 8k */
-        pool->stack_mem_pool = mem_pool_new (call_stack_t, 8192); 
+        /* stack_mem_pool size 256 * 128 */
+        pool->stack_mem_pool = mem_pool_new (call_stack_t, 16);
 
         if (!pool->stack_mem_pool)
                 return -1;
 
-        ctx->stub_mem_pool = mem_pool_new (call_stub_t, 1024);
+        ctx->stub_mem_pool = mem_pool_new (call_stub_t, 16);
         if (!ctx->stub_mem_pool)
+                return -1;
+
+        ctx->dict_pool = mem_pool_new (dict_t, 32);
+        if (!ctx->dict_pool)
+                return -1;
+
+        ctx->dict_pair_pool = mem_pool_new (data_pair_t, 512);
+        if (!ctx->dict_pair_pool)
+                return -1;
+
+        ctx->dict_data_pool = mem_pool_new (data_t, 512);
+        if (!ctx->dict_data_pool)
                 return -1;
 
         INIT_LIST_HEAD (&pool->all_frames);
@@ -273,6 +284,8 @@ cli_submit_request (void *req, call_frame_t *frame,
 out:
         if (new_iobref)
                 iobref_unref (iobref);
+        if (iobuf)
+                iobuf_unref (iobuf);
         return ret;
 }
 
@@ -325,6 +338,11 @@ cli_opt_parse (char *opt, struct cli_state *state)
         if (strcmp (opt, "version") == 0) {
                 puts (argp_program_version);
                 exit (0);
+        }
+
+        if (strcmp (opt, "xml") == 0) {
+                state->mode |= GLUSTER_MODE_XML;
+                return 0;
         }
 
         oarg = strtail (opt, "mode=");
@@ -432,9 +450,33 @@ cli_usage_out (const char *usage)
         if (!usage || usage[0] == '\0')
                 return -1;
 
-        cli_out ("Usage: %s", usage);
+        cli_err ("Usage: %s", usage);
         return 0;
 }
+
+int
+_cli_err (const char *fmt, ...)
+{
+        struct cli_state *state = NULL;
+        va_list           ap;
+        int               ret = 0;
+
+        state = global_state;
+
+        va_start (ap, fmt);
+
+#ifdef HAVE_READLINE
+        if (state->rl_enabled && !state->rl_processing)
+                return cli_rl_err(state, fmt, ap);
+#endif
+
+        ret = vfprintf (stderr, fmt, ap);
+        fprintf (stderr, "\n");
+        va_end (ap);
+
+        return ret;
+}
+
 
 int
 _cli_out (const char *fmt, ...)
@@ -490,7 +532,7 @@ cli_rpc_init (struct cli_state *state)
         if (ret)
                 goto out;
 
-        rpc = rpc_clnt_new (options, this->ctx, this->name);
+        rpc = rpc_clnt_new (options, this->ctx, this->name, 16);
 
         if (!rpc)
                 goto out;
@@ -525,6 +567,10 @@ void
 cli_local_wipe (cli_local_t *local)
 {
         if (local) {
+                if (local->get_vol.volname)
+                        GF_FREE (local->get_vol.volname);
+                if (local->dict)
+                        dict_unref (local->dict);
                 GF_FREE (local);
         }
 

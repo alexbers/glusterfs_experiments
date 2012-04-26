@@ -29,12 +29,18 @@
 #include "glusterfs.h"
 #include "protocol-common.h"
 
+#if (HAVE_LIB_XML)
+#include <libxml/encoding.h>
+#include <libxml/xmlwriter.h>
+#endif
+
 #define DEFAULT_EVENT_POOL_SIZE            16384
 #define CLI_GLUSTERD_PORT                  24007
 #define CLI_DEFAULT_CONN_TIMEOUT             120
 #define CLI_DEFAULT_CMD_TIMEOUT              120
-#define CLI_TOP_CMD_TIMEOUT                  300 //Longer timeout for volume top
+#define CLI_TOP_CMD_TIMEOUT                  600 //Longer timeout for volume top
 #define DEFAULT_CLI_LOG_FILE_DIRECTORY     DATADIR "/log/glusterfs"
+#define DEFAULT_LOG_FILE_DIRECTORY         DATADIR "/log/glusterfs"
 #define CLI_VOL_STATUS_BRICK_LEN              55
 #define CLI_TAB_LENGTH                         8
 #define CLI_BRICK_STATUS_LINE_LEN             78
@@ -46,7 +52,7 @@ enum argp_option_keys {
 
 #define GLUSTER_MODE_SCRIPT    (1 << 0)
 #define GLUSTER_MODE_ERR_FATAL (1 << 1)
-
+#define GLUSTER_MODE_XML       (1 << 2)
 struct cli_state;
 struct cli_cmd_word;
 struct cli_cmd_tree;
@@ -122,6 +128,13 @@ struct cli_local {
         } get_vol;
 
         dict_t          *dict;
+        /* Marker for volume status all */
+        gf_boolean_t    all;
+#if (HAVE_LIB_XML)
+        xmlTextWriterPtr        writer;
+        xmlBufferPtr            buf;
+        int                     vol_count;
+#endif
 };
 
 struct cli_volume_status {
@@ -132,12 +145,14 @@ struct cli_volume_status {
         uint64_t       free_inodes;
         char          *brick;
         char          *pid_str;
-        char          *fs_name;
         char          *free;
         char          *total;
+#ifdef GF_LINUX_HOST_OS
+        char          *fs_name;
         char          *mount_options;
         char          *device;
         char          *inode_size;
+#endif
 };
 
 typedef struct cli_volume_status cli_volume_status_t;
@@ -162,15 +177,24 @@ int cli_cmd_process_line (struct cli_state *state, const char *line);
 
 int cli_rl_enable (struct cli_state *state);
 int cli_rl_out (struct cli_state *state, const char *fmt, va_list ap);
+int cli_rl_err (struct cli_state *state, const char *fmt, va_list ap);
 
 int cli_usage_out (const char *usage);
 
 int _cli_out (const char *fmt, ...);
+int _cli_err (const char *fmt, ...);
 
 #define cli_out(fmt...) do {                       \
                 FMT_WARN (fmt);                    \
                                                    \
                 _cli_out(fmt);                     \
+                                                   \
+        } while (0)
+
+#define cli_err(fmt...) do {                       \
+                FMT_WARN (fmt);                    \
+                                                   \
+                _cli_err(fmt);                     \
                                                    \
         } while (0)
 
@@ -219,6 +243,9 @@ cli_cmd_log_filename_parse (const char **words, int wordcount, dict_t **options)
 int32_t
 cli_cmd_volume_statedump_options_parse (const char **words, int wordcount,
                                         dict_t **options);
+int32_t
+cli_cmd_volume_clrlks_opts_parse (const char **words, int wordcount,
+                                  dict_t **options);
 
 cli_local_t * cli_local_get ();
 
@@ -254,6 +281,10 @@ cli_cmd_volume_status_parse (const char **words, int wordcount,
                              dict_t **options);
 
 int
+cli_cmd_volume_heal_options_parse (const char **words, int wordcount,
+                                   dict_t **options);
+
+int
 cli_print_brick_status (cli_volume_status_t *status);
 
 void
@@ -264,4 +295,46 @@ cli_get_detail_status (dict_t *dict, int i, cli_volume_status_t *status);
 
 void
 cli_print_line (int len);
+
+#if (HAVE_LIB_XML)
+int
+cli_xml_output_str (char *op, char *str, int op_ret, int op_errno,
+                    char *op_errstr);
+
+int
+cli_xml_output_dict (char *op, dict_t *dict, int op_ret, int op_errno,
+                     char *op_errstr);
+
+int
+cli_xml_output_vol_top (dict_t *dict, int op_ret, int op_errno,
+                        char *op_errstr);
+
+int
+cli_xml_output_vol_profile (dict_t *dict, int op_ret, int op_errno,
+                            char *op_errstr);
+
+int
+cli_xml_output_vol_status (dict_t *dict, int op_ret, int op_errno,
+                           char *op_errstr);
+
+int
+cli_xml_output_vol_list (dict_t *dict, int op_ret, int op_errno,
+                         char *op_errstr);
+
+int
+cli_xml_output_vol_info_begin (cli_local_t *local, int op_ret, int op_errno,
+                               char *op_errstr);
+
+int
+cli_xml_output_vol_info_end (cli_local_t *local);
+
+int
+cli_xml_output_vol_info (cli_local_t *local, dict_t *dict);
+
+int
+cli_xml_output_vol_quota_limit_list (char *volname, char *limit_list,
+                                      int op_ret, int op_errno,
+                                      char *op_errstr);
+#endif
+
 #endif /* __CLI_H__ */

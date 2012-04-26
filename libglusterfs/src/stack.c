@@ -109,6 +109,7 @@ gf_proc_dump_call_stack (call_stack_t *call_stack, const char *key_buf,...)
         gf_proc_dump_write("gid", "%d", call_stack->gid);
         gf_proc_dump_write("pid", "%d", call_stack->pid);
         gf_proc_dump_write("unique", "%Ld", call_stack->unique);
+        gf_proc_dump_write("lk-owner", "%s", lkowner_utoa (&call_stack->lk_owner));
 
         if (call_stack->type == GF_OP_TYPE_FOP)
                 gf_proc_dump_write("op", "%s", gf_fop_list[call_stack->op]);
@@ -186,7 +187,7 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
 
         memset (key, 0, sizeof (key));
         snprintf (key, sizeof (key), "%s.translator", prefix);
-        ret = dict_set_str (dict, key, gf_strdup (tmp_frame.this->name));
+        ret = dict_set_dynstr (dict, key, gf_strdup (tmp_frame.this->name));
         if (ret)
                 return;
 
@@ -199,7 +200,7 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
         if (tmp_frame.parent) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%s.parent", prefix);
-                ret = dict_set_str (dict, key,
+                ret = dict_set_dynstr (dict, key,
                                     gf_strdup (tmp_frame.parent->this->name));
                 if (ret)
                         return;
@@ -208,7 +209,8 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
         if (tmp_frame.wind_from) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%s.windfrom", prefix);
-                ret = dict_set_str (dict, key, gf_strdup (tmp_frame.wind_from));
+                ret = dict_set_dynstr (dict, key,
+                                       gf_strdup (tmp_frame.wind_from));
                 if (ret)
                         return;
         }
@@ -216,7 +218,8 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
         if (tmp_frame.wind_to) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%s.windto", prefix);
-                ret = dict_set_str (dict, key, gf_strdup (tmp_frame.wind_to));
+                ret = dict_set_dynstr (dict, key,
+                                       gf_strdup (tmp_frame.wind_to));
                 if (ret)
                         return;
         }
@@ -224,7 +227,8 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
         if (tmp_frame.unwind_from) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%s.unwindfrom", prefix);
-                ret = dict_set_str (dict, key, gf_strdup (tmp_frame.unwind_from));
+                ret = dict_set_dynstr (dict, key,
+                                       gf_strdup (tmp_frame.unwind_from));
                 if (ret)
                         return;
         }
@@ -232,7 +236,8 @@ gf_proc_dump_call_frame_to_dict (call_frame_t *call_frame,
         if (tmp_frame.unwind_to) {
                 memset (key, 0, sizeof (key));
                 snprintf (key, sizeof (key), "%s.unwind_to", prefix);
-                ret = dict_set_str (dict, key, gf_strdup (tmp_frame.unwind_to));
+                ret = dict_set_dynstr (dict, key,
+                                       gf_strdup (tmp_frame.unwind_to));
         }
 
         return;

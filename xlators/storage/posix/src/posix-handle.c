@@ -27,7 +27,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <libgen.h>
+#ifdef GF_LINUX_HOST_OS
 #include <alloca.h>
+#endif
 
 #include "posix-handle.h"
 #include "posix.h"
@@ -619,3 +621,20 @@ posix_handle_unset (xlator_t *this, uuid_t gfid, const char *basename)
         return ret;
 }
 
+
+int
+posix_create_link_if_gfid_exists (xlator_t *this, uuid_t gfid,
+                                  char *real_path)
+{
+        int ret = -1;
+        struct stat stbuf = {0,};
+        char *newpath = NULL;
+
+        MAKE_HANDLE_PATH (newpath, this, gfid, NULL);
+        ret = lstat (newpath, &stbuf);
+        if (!ret) {
+                ret = link (newpath, real_path);
+        }
+
+        return ret;
+}

@@ -63,7 +63,7 @@ trash_local_wipe (trash_local_t *local)
         if (local->newfd)
                 fd_unref (local->newfd);
 
-        GF_FREE (local);
+        mem_put (local);
 out:
         return;
 }
@@ -533,8 +533,7 @@ trash_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_ERROR, "out of memory");
                 TRASH_STACK_UNWIND (rename, frame, -1, ENOMEM,
@@ -610,8 +609,7 @@ trash_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc)
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t),
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (unlink, frame, -1, ENOMEM, NULL, NULL);
@@ -690,7 +688,7 @@ trash_truncate_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         local->fsize = stbuf->ia_size;
         STACK_WIND (frame, trash_truncate_writev_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->writev,
-                    local->newfd, vector, count, local->cur_offset, iobuf);
+                    local->newfd, vector, count, local->cur_offset, 0, iobuf);
 
 out:
         return 0;
@@ -723,7 +721,7 @@ trash_truncate_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 STACK_WIND (frame, trash_truncate_readv_cbk,
                             FIRST_CHILD(this), FIRST_CHILD(this)->fops->readv,
                             local->fd, (size_t)GF_BLOCK_READV_SIZE,
-                            local->cur_offset);
+                            local->cur_offset, 0);
                 goto out;
         }
 
@@ -763,7 +761,7 @@ trash_truncate_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_truncate_readv_cbk,
                     FIRST_CHILD (this), FIRST_CHILD (this)->fops->readv,
-                    local->fd, (size_t)GF_BLOCK_READV_SIZE, local->cur_offset);
+                    local->fd, (size_t)GF_BLOCK_READV_SIZE, local->cur_offset, 0);
 
 out:
         return 0;
@@ -1044,8 +1042,7 @@ trash_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         LOCK_INIT (&frame->lock);
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (truncate, frame, -1, ENOMEM, NULL, NULL);
@@ -1110,7 +1107,7 @@ trash_ftruncate_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 STACK_WIND (frame, trash_ftruncate_readv_cbk,
                             FIRST_CHILD(this), FIRST_CHILD(this)->fops->readv,
                             local->fd, (size_t)GF_BLOCK_READV_SIZE,
-                            local->cur_offset);
+                            local->cur_offset, 0);
                 return 0;
         }
 
@@ -1142,7 +1139,7 @@ trash_ftruncate_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_ftruncate_writev_cbk,
                     FIRST_CHILD(this), FIRST_CHILD(this)->fops->writev,
-                    local->newfd, vector, count, local->cur_offset, NULL);
+                    local->newfd, vector, count, local->cur_offset, 0, NULL);
 
         return 0;
 }
@@ -1194,7 +1191,7 @@ trash_ftruncate_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         STACK_WIND (frame, trash_ftruncate_readv_cbk, FIRST_CHILD(this),
                     FIRST_CHILD(this)->fops->readv, local->fd,
-                    (size_t)GF_BLOCK_READV_SIZE, local->cur_offset);
+                    (size_t)GF_BLOCK_READV_SIZE, local->cur_offset, 0);
 
         return 0;
 }
@@ -1385,8 +1382,7 @@ trash_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset)
                 return 0;
         }
 
-        local = GF_CALLOC (1, sizeof (trash_local_t), 
-                           gf_trash_mt_trash_local_t);
+        local = mem_get0 (this->local_pool);
         if (!local) {
                 gf_log (this->name, GF_LOG_DEBUG, "out of memory");
                 TRASH_STACK_UNWIND (ftruncate, frame, -1, ENOMEM, NULL, NULL);
@@ -1521,6 +1517,14 @@ init (xlator_t *this)
                 gf_log (this->name, GF_LOG_DEBUG, "%"GF_PRI_SIZET" max-size",
                         _priv->max_trash_file_size);
         }
+
+        this->local_pool = mem_pool_new (trash_local_t, 64);
+        if (!this->local_pool) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "failed to create local_t's memory pool");
+                return -1;
+        }
+
 
         this->private = (void *)_priv;
         return 0;
