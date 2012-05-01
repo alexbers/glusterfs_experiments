@@ -39,6 +39,7 @@
 
 #define STRIPE_PATHINFO_HEADER "STRIPE:"
 
+#define STRIPE_MIN_BLOCK_SIZE  (16*GF_UNIT_KB)
 
 #define STRIPE_STACK_UNWIND(fop, frame, params ...) do {           \
                 stripe_local_t *__local = NULL;                    \
@@ -66,8 +67,8 @@
 
 typedef struct stripe_xattr_sort {
         int32_t  pos;
-        int32_t  pathinfo_len;
-        char    *pathinfo;
+        int32_t  xattr_len;
+        char    *xattr_value;
 } stripe_xattr_sort_t;
 
 /**
@@ -185,12 +186,14 @@ struct stripe_local {
         mode_t               mode;
         dev_t                rdev;
         /* For File I/O fops */
-        dict_t              *dict;
+        dict_t              *xdata;
 
         stripe_xattr_sort_t *xattr_list;
         int32_t              xattr_total_len;
         int32_t              nallocs;
 
+        char xsel[256];
+        
         struct marker_str    marker;
 
         /* General usage */
@@ -208,8 +211,12 @@ struct stripe_local {
         struct iobref       *iobref;
         struct iovec        *iovec;
         gf_dirent_t          entries;
+        gf_dirent_t         *dirent;
         dict_t              *xattr;
         uuid_t               ia_gfid;
+        
+        int                  xflag;
+        mode_t               umask;
         
         void                *checksum_xor_with; // always has stripe_size
 };
@@ -219,6 +226,7 @@ struct saved_write_contex {
         struct iovec        *vector;
         int32_t             count;
         off_t               offset;
+        uint32_t            flags;
         struct iobref       *iobref;
 };
 
