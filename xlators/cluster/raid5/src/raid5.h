@@ -171,7 +171,8 @@ struct stripe_local {
         int32_t              wind_count; /* used instead of child_cound
                                             in case of read and write */
         int32_t              group_count;
-        int32_t              call_count_in_group;   
+        int32_t              call_count_in_group;
+        int32_t              checksum_blocknum_in_group;
         
         int32_t              op_ret;
         int32_t              op_errno;
@@ -218,7 +219,7 @@ struct stripe_local {
         int                  xflag;
         mode_t               umask;
         
-        void                *checksum_xor_with; // always has stripe_size
+        char                *checksum_xor_with; // always has stripe_size
 };
 
 struct saved_write_contex {
@@ -227,7 +228,6 @@ struct saved_write_contex {
         int32_t             count;
         off_t               offset;
         uint32_t            flags;
-        struct iobref       *iobref;
 };
 
 typedef struct stripe_local   stripe_local_t;
