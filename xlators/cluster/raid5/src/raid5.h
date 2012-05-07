@@ -50,7 +50,7 @@
                 STACK_UNWIND_STRICT (fop, frame, params);       \
                 if (__local) {                                  \
                         stripe_local_wipe(__local);             \
-                        GF_FREE (__local);                      \
+                        mem_put (__local);                      \
                 }                                               \
         } while (0)
 
@@ -61,7 +61,7 @@
                 STACK_DESTROY (frame->root);              \
                 if (__local) {                            \
                         stripe_local_wipe (__local);      \
-                        GF_FREE (__local);                \
+                        mem_put (__local);                \
                 }                                         \
         } while (0)
 
