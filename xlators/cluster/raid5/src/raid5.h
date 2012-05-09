@@ -90,6 +90,7 @@ struct stripe_private {
         uint64_t                block_size;
         gf_lock_t               lock;
         uint8_t                 nodes_down;
+        uint8_t                 bad_node_index; /* if nodes_down > 0 */
         int8_t                  first_child_down;
         int8_t                  child_count;
         int8_t                 *state; /* Current state of child node */
@@ -116,6 +117,7 @@ typedef struct _stripe_fd_ctx {
         int        stripe_count;
         int        static_array;
         uint64_t   real_size;
+        int32_t    bad_node_index; /* equals -1 if all nodes are good */
         xlator_t **xl_array;
 } stripe_fd_ctx_t;
 
@@ -219,7 +221,7 @@ struct stripe_local {
         int                  xflag;
         mode_t               umask;
         
-        char                *checksum_xor_with; // always has stripe_size
+        unsigned char       *checksum_xor_with; // always has stripe_size
 };
 
 struct saved_write_contex {
