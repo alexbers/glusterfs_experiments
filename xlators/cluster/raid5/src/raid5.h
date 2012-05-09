@@ -164,9 +164,6 @@ struct stripe_local {
         int32_t              entry_count;
         int32_t              node_index;
 
-        int32_t              full_block_start;
-        int32_t              req_block_start;
-        int32_t              req_block_end;
         int32_t              block_num;
 
         int32_t              call_count;
