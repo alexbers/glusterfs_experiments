@@ -172,6 +172,8 @@ struct stripe_local {
         int32_t              call_count_in_group;
         int32_t              checksum_blocknum_in_group;
         
+        int8_t               is_first;
+        
         int32_t              op_ret;
         int32_t              op_errno;
         int32_t              count;
