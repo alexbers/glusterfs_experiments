@@ -947,6 +947,40 @@ err:
         return 0;
 }
 
+int
+stripe_truncate_setattr_cbk (call_frame_t *frame, void *cookie,
+                      xlator_t *this, int op_ret, int op_errno, dict_t *xdata)
+{
+        stripe_local_t *local = NULL;
+
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+        local = frame->local;
+        
+        if(op_ret!=0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "BAY: failed to set xattrs, errno=%d", op_ret);
+        }
+
+        LOCK(&frame->lock);
+        {
+                local->wind_count--;
+        }
+        UNLOCK(&frame->lock);
+        
+        if(local->wind_count==0) {
+                STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
+                                local->op_errno, &local->pre_buf,
+                                &local->post_buf, NULL);
+        }
+                
+out:
+        return 0;
+}
 
 
 int32_t
@@ -954,35 +988,46 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
                      struct iatt *postbuf, dict_t *xdata)
 {
-        int32_t         callcnt = 0;
-        stripe_local_t *local = NULL;
-        call_frame_t   *prev = NULL;
+        int32_t           callcnt  = 0;
+        int8_t            is_first = 0;
+        stripe_local_t   *local    = NULL;
+        call_frame_t     *prev     = NULL;
+        stripe_fd_ctx_t  *fctx     = NULL;
+        int               idx      = 0;
+        dict_t           *dict     = NULL;
+        stripe_private_t *priv     = NULL;
+        int               ret      = 0;
+        
 
-        if (!this || !frame || !frame->local || !cookie) {
+        if (!this || !this->private || !frame || !frame->local || !cookie) {
                 gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
                 goto out;
         }
 
         prev  = cookie;
+        priv = this->private;
         local = frame->local;
-
+        
+        fctx = local->fctx;
+        
         LOCK (&frame->lock);
         {
                 callcnt = --local->call_count;
-
+                is_first = local->is_first;
+                local->is_first == 0;
+                
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
                                 "%s returned error %s",
                                 prev->this->name, strerror (op_errno));
                         local->op_errno = op_errno;
-                        if ((op_errno != ENOENT) ||
-                            (prev->this == FIRST_CHILD (this)))
+                        if ((op_errno != ENOENT) || is_first)
                                 local->failed = 1;
                 }
 
                 if (op_ret == 0) {
                         local->op_ret = 0;
-                        if (FIRST_CHILD(this) == prev->this) {
+                        if (is_first) {
                                 local->pre_buf  = *prebuf;
                                 local->post_buf = *postbuf;
                         }
@@ -1003,16 +1048,40 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 if (local->failed)
                         local->op_ret = -1;
 
+                
                 if (local->op_ret != -1) {
                         local->pre_buf.ia_blocks  = local->prebuf_blocks;
                         local->pre_buf.ia_size    = local->prebuf_size;
                         local->post_buf.ia_blocks = local->postbuf_blocks;
                         local->post_buf.ia_size   = local->postbuf_size;
-                }
+                        
+                        dict = dict_new();
+                        if (!dict) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "failed to allocate dict %s", local->loc.path);
+                        }
+                        
+                        fctx->real_size = local->offset;
 
-                STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
-                                     local->op_errno, &local->pre_buf,
-                                     &local->post_buf, NULL);
+                        ret = stripe_xattr_request_build_short (this, dict, fctx->real_size, fctx->bad_node_index);
+                        if (ret)
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Failed to build short xattr request");
+                                
+                        local->wind_count= fctx->stripe_count - priv->nodes_down;
+
+                        for(idx=0;idx<fctx->stripe_count;idx++) {
+                                if(priv->state[idx]) {
+                                        STACK_WIND (frame, stripe_truncate_setattr_cbk, fctx->xl_array[idx],
+                                                fctx->xl_array[idx]->fops->setxattr, &local->loc, dict, ATTR_ROOT, NULL);
+                                }
+                        }
+                        dict_unref(dict);
+                } else {
+                        STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
+                                        local->op_errno, &local->pre_buf,
+                                       &local->post_buf, NULL);
+                }
         }
 out:
         return 0;
@@ -1024,8 +1093,12 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
         xlator_list_t    *trav = NULL;
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
+        stripe_fd_ctx_t  *fctx = NULL;
         int32_t           op_errno = EINVAL;
-
+        int               i = 0;
+        off_t             new_offset;
+        
+        
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
         VALIDATE_OR_GOTO (loc, err);
@@ -1039,6 +1112,13 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
                 op_errno = ENOTCONN;
                 goto err;
         }
+
+        inode_ctx_get(loc->inode, this, (uint64_t *) &fctx);
+        if (!fctx) {
+                gf_log(this->name, GF_LOG_ERROR, "no stripe context");
+                op_errno = EINVAL;
+                goto err;
+        }
         
         /* Initialization */
         local = mem_get0 (this->local_pool);
@@ -1047,13 +1127,32 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
                 goto err;
         }
         local->op_ret = -1;
+        local->is_first = 1;
+        local->fctx = fctx;
+        local->offset = offset;
+        loc_copy (&local->loc, loc);
         frame->local = local;
-        local->call_count = priv->child_count;
-
-        while (trav) {
-                STACK_WIND (frame, stripe_truncate_cbk, trav->xlator,
-                            trav->xlator->fops->truncate, loc, offset, NULL);
-                trav = trav->next;
+        local->call_count = priv->child_count - priv->nodes_down;
+        
+        
+        if(priv->nodes_down == 1) {
+                if(fctx->bad_node_index != -1 &&
+                   (fctx->bad_node_index != priv->bad_node_index)) {
+                        op_errno = ENOTCONN;
+                        goto err;
+                }
+                
+                fctx->bad_node_index = priv->bad_node_index;
+        } 
+        
+        new_offset = get_phys_block_num( offset/fctx->stripe_size, fctx->stripe_count) * fctx->stripe_size;
+        new_offset = (new_offset + fctx->stripe_count - 1) / fctx->stripe_count * fctx->stripe_count;
+        
+        for (i=0; i<priv->child_count; i++) {
+                  if(priv->state[i]) {
+                        STACK_WIND (frame, stripe_truncate_cbk, fctx->xl_array[i],
+                                fctx->xl_array[i]->fops->truncate, loc, new_offset, NULL);
+                  }
         }
 
         return 0;
@@ -5563,6 +5662,34 @@ out:
         return ret;
 }
 
+int32_t
+stripe_xattr_request_build_short (xlator_t *this, dict_t *dict, 
+                            uint64_t real_size, uint32_t bad_node_index
+                           )
+{
+        char            key[256]       = {0,};
+        int32_t         ret             = -1;
+
+        sprintf (key, "trusted.%s.real-size", this->name);
+        ret = dict_set_int64 (dict, key, real_size);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "failed to set %s in xattr_req dict", key);
+                goto out;
+        }
+
+        sprintf (key, "trusted.%s.bad-node-index", this->name);
+        ret = dict_set_int32 (dict, key, bad_node_index);
+        if (ret) {
+                gf_log (this->name, GF_LOG_WARNING,
+                        "failed to set %s in xattr_req dict", key);
+                goto out;
+        }
+        
+        
+out:
+        return ret;
+}
 
 
 int32_t
