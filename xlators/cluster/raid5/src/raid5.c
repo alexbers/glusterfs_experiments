@@ -95,9 +95,8 @@ void xor_data(unsigned char *dest, unsigned char *src_1, unsigned char *src_2, s
  */
 void xor_data_with(unsigned char *dest, unsigned char *src_1, unsigned char *src_2, size_t size) {
         size_t off = 0;
-        for(off=0; off<size; off++) {
+        for(off=0; off<size; off++) 
                 dest[off]^=src_1[off] ^ src_2[off];
-        }
 }
 
  
@@ -3996,10 +3995,7 @@ done:
         iobref_unref (tmp_iobref);
         if (final_vec)
                 GF_FREE (final_vec);
-        goto out;
-       
 out:
-        STRIPE_STACK_DESTROY (frame);
 end:
         return 0;
 }
@@ -4125,7 +4121,9 @@ stripe_bypassing_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                               mlocal->replies[i].vector[j].iov_base,
                                               mlocal->replies[i].vector[j].iov_len );
                                 off+=mlocal->replies[i].vector[j].iov_len;
-                        }       
+                        }
+                        
+                        GF_FREE (mlocal->replies[i].vector);
                 }
                                 
                 mmlocal->replies[orig_index].op_ret = bytes_readed;
@@ -4142,18 +4140,20 @@ cleanup:
                 GF_FREE (mlocal->replies);
                 LOCK(&mmframe->lock);
                 {
-                        callcnt = ++mmlocal->call_count;
+                        mmlocal->call_count++;
                 }
                 UNLOCK(&mmframe->lock);
                 iobref_unref (mlocal->iobref);
         }        
 
-        if (mmlocal->call_count == mmlocal->wind_count) {
+        if (mmlocal->call_count == mmlocal->wind_count)
                 finalize_readv(mframe, this,fctx);
-                goto out;
-        }
         
 out:
+        if (callcnt == mlocal->wind_count) {
+                STRIPE_STACK_DESTROY (mframe);                
+        }
+
         STRIPE_STACK_DESTROY (frame);
 end:
         return 0;
@@ -4219,10 +4219,8 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
         UNLOCK(&mframe->lock);
 
-        if (callcnt == mlocal->wind_count) {
+        if (callcnt == mlocal->wind_count)
                 finalize_readv(frame, this,fctx);
-                goto end;
-        }
 
 out:
         STRIPE_STACK_DESTROY (frame);
