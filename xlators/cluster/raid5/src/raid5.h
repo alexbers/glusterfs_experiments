@@ -94,7 +94,6 @@ struct stripe_private {
         int8_t                  first_child_down;
         int8_t                  child_count;
         int8_t                 *state; /* Current state of child node */
-        gf_boolean_t            xattr_supported;  /* default yes */
         char                    vol_uuid[UUID_SIZE + 1];
 };
 
