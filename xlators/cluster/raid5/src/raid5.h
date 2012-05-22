@@ -109,17 +109,11 @@ struct readv_replies {
         struct iatt   stbuf;    /* 'stbuf' is also a part of reply */
 };
 
-
-
 typedef struct _stripe_fd_ctx {
         off_t      stripe_size;
-        int        stripe_count;
-        int        static_array;
         uint64_t   real_size;
         int32_t    bad_node_index; /* equals -1 if all nodes are good */
-        xlator_t **xl_array;
 } stripe_fd_ctx_t;
-
 
 /**
  * Local structure to be passed with all the frames in case of STACK_WIND
