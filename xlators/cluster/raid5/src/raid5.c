@@ -3570,6 +3570,7 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         frame->local = local;
         local->fctx = fctx;
         local->fd = fd_ref(fd);
+        local->is_first = 1;
         local->call_count = priv->child_count;
 
         while (trav) {
