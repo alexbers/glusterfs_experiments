@@ -969,7 +969,11 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         priv = this->private;
         local = frame->local;
         
+        VALIDATE_OR_GOTO (local, out);
+        VALIDATE_OR_GOTO (local->fctx, out);
+        
         fctx = local->fctx;
+        
         
         LOCK (&frame->lock);
         {
@@ -3395,7 +3399,8 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         stripe_private_t *priv = NULL;
         xlator_list_t    *trav = NULL;
         int32_t           op_errno = 1;
-
+        stripe_fd_ctx_t  *fctx = NULL;
+        
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
         VALIDATE_OR_GOTO (fd, err);
@@ -3403,7 +3408,13 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
 
         priv = this->private;
         trav = this->children;
-
+ 
+        inode_ctx_get(fd->inode, this, (uint64_t *) &fctx);
+        if (!fctx) {
+                gf_log(this->name, GF_LOG_ERROR, "no stripe context");
+                op_errno = EINVAL;
+                goto err;
+        }
         /* Initialization */
         local = mem_get0 (this->local_pool);
 
@@ -3413,6 +3424,7 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         }
         local->op_ret = -1;
         frame->local = local;
+        local->fctx = fctx;
         local->call_count = priv->child_count;
 
         while (trav) {
