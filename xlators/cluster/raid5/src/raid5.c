@@ -3393,6 +3393,115 @@ err:
 
 
 int32_t
+stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                     int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
+                     struct iatt *postbuf, dict_t *xdata)
+{
+        int32_t           callcnt  = 0;
+        int8_t            is_first = 0;
+        stripe_local_t   *local    = NULL;
+        call_frame_t     *prev     = NULL;
+        stripe_fd_ctx_t  *fctx     = NULL;
+        int               idx      = 0;
+        dict_t           *dict     = NULL;
+        stripe_private_t *priv     = NULL;
+        int               ret      = 0;
+
+        if (!this || !this->private || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+        prev  = cookie;
+        priv = this->private;
+        local = frame->local;
+        
+        VALIDATE_OR_GOTO (local, out);
+        VALIDATE_OR_GOTO (local->fctx, out);
+        
+        fctx = local->fctx;
+        
+        
+        LOCK (&frame->lock);
+        {
+                callcnt = --local->call_count;
+                is_first = local->is_first;
+                local->is_first = 0;
+                
+                if (op_ret == -1) {
+                        gf_log (this->name, GF_LOG_DEBUG,
+                                "%s returned error %s",
+                                prev->this->name, strerror (op_errno));
+                        local->op_errno = op_errno;
+                        if ((op_errno != ENOENT) || is_first)
+                                local->failed = 1;
+                }
+
+                if (op_ret == 0) {
+                        local->op_ret = 0;
+                        if (is_first) {
+                                local->pre_buf  = *prebuf;
+                                local->post_buf = *postbuf;
+                        }
+
+                        local->prebuf_blocks  += prebuf->ia_blocks;
+                        local->postbuf_blocks += postbuf->ia_blocks;
+
+                        if (local->prebuf_size < prebuf->ia_size)
+                                local->prebuf_size = prebuf->ia_size;
+
+                        if (local->postbuf_size < postbuf->ia_size)
+                                local->postbuf_size = postbuf->ia_size;
+                }
+        }
+        UNLOCK (&frame->lock);
+
+        if (!callcnt) {
+                if (local->failed)
+                        local->op_ret = -1;
+
+                
+                if (local->op_ret != -1) {
+                        local->pre_buf.ia_blocks  = local->prebuf_blocks;
+                        local->pre_buf.ia_size    = local->prebuf_size;
+                        local->post_buf.ia_blocks = local->postbuf_blocks;
+                        local->post_buf.ia_size   = local->postbuf_size;
+                        
+                        dict = dict_new();
+                        if (!dict) {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "failed to allocate dict");
+                        }
+                        
+                        fctx->real_size = local->offset;
+
+                        ret = stripe_xattr_request_build_short (this, dict, fctx->real_size, fctx->bad_node_index);
+                        if (ret)
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "Failed to build short xattr request");
+                                
+                        local->wind_count= priv->child_count - priv->nodes_down;
+
+                        for(idx=0;idx<priv->child_count;idx++) {
+                                if(priv->state[idx]) {
+                                        STACK_WIND (frame, stripe_truncate_setattr_cbk, priv->xl_array[idx],
+                                                priv->xl_array[idx]->fops->fsetxattr, local->fd, dict, ATTR_ROOT, NULL);
+                                }
+                        }
+                        dict_unref(dict);
+                } else {
+                        STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
+                                        local->op_errno, &local->pre_buf,
+                                       &local->post_buf, NULL);
+                }
+                fd_unref(local->fd);
+        }
+out:
+        return 0;
+}
+
+
+int32_t
 stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, dict_t *xdata)
 {
         stripe_local_t   *local = NULL;
@@ -3425,10 +3534,11 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         local->op_ret = -1;
         frame->local = local;
         local->fctx = fctx;
+        local->fd = fd_ref(fd);
         local->call_count = priv->child_count;
 
         while (trav) {
-                STACK_WIND (frame, stripe_truncate_cbk, trav->xlator,
+                STACK_WIND (frame, stripe_ftruncate_cbk, trav->xlator,
                             trav->xlator->fops->ftruncate, fd, offset, NULL);
                 trav = trav->next;
         }
