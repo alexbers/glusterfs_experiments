@@ -4352,8 +4352,6 @@ stripe_writev_setattr_cbk (call_frame_t *frame, void *cookie,
                 //gf_log (this->name, GF_LOG_WARNING,
                 //        "BAY: stripe_writev_setattr_cbk, local->op_ret=%d, op_ret=%d", local->op_ret, op_ret);
                 
-                if(local->op_ret>0)
-                        local->op_ret=local->size;
                 STRIPE_STACK_UNWIND (writev, frame, local->op_ret,
                                 local->op_errno, &local->pre_buf,
                                 &local->post_buf, NULL);
@@ -4397,6 +4395,9 @@ void stripe_prefinalize_writev(call_frame_t *frame,xlator_t *this) {
                 goto err;
         }
 
+        if(local->op_ret>=0)
+                local->op_ret=local->size;
+        
         fctx->real_size = max(fctx->real_size,local->offset+local->op_ret);
         
         ret = stripe_xattr_request_build_short (this, dict, fctx->real_size, fctx->bad_node_index);
