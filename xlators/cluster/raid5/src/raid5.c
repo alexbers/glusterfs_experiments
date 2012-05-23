@@ -3392,6 +3392,41 @@ err:
 }
 
 
+int
+stripe_ftruncate_setattr_cbk (call_frame_t *frame, void *cookie,
+                      xlator_t *this, int op_ret, int op_errno, dict_t *xdata)
+{
+        stripe_local_t *local = NULL;
+
+
+        if (!this || !frame || !frame->local || !cookie) {
+                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
+                goto out;
+        }
+
+        local = frame->local;
+        
+        if(op_ret!=0) {
+                gf_log (this->name, GF_LOG_ERROR,
+                        "BAY: failed to set xattrs, errno=%d", op_ret);
+        }
+
+        LOCK(&frame->lock);
+        {
+                local->wind_count--;
+        }
+        UNLOCK(&frame->lock);
+        
+        if(local->wind_count==0) {
+                STRIPE_STACK_UNWIND (ftruncate, frame, local->op_ret,
+                                local->op_errno, &local->pre_buf,
+                                &local->post_buf, NULL);
+        }
+                
+out:
+        return 0;
+}
+
 int32_t
 stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      int32_t op_ret, int32_t op_errno, struct iatt *prebuf,
@@ -3484,7 +3519,7 @@ stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                         for(idx=0;idx<priv->child_count;idx++) {
                                 if(priv->state[idx]) {
-                                        STACK_WIND (frame, stripe_truncate_setattr_cbk, priv->xl_array[idx],
+                                        STACK_WIND (frame, stripe_ftruncate_setattr_cbk, priv->xl_array[idx],
                                                 priv->xl_array[idx]->fops->fsetxattr, local->fd, dict, ATTR_ROOT, NULL);
                                 }
                         }
