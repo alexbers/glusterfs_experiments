@@ -3494,7 +3494,7 @@ stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                         local->op_errno, &local->pre_buf,
                                        &local->post_buf, NULL);
                 }
-                fd_unref(local->fd);
+                //fd_unref(local->fd);
         }
 out:
         return 0;
