@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2009-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #include "quick-read.h"
@@ -60,7 +51,7 @@ qr_local_new (xlator_t *this)
         }
 
         LOCK_INIT (&local->lock);
-        INIT_LIST_HEAD (&local->fd_list);
+        INIT_LIST_HEAD (&local->list);
 out:
         return local;
 }
@@ -429,13 +420,32 @@ qr_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         }
                 }
 
+		/*
+		 * Create our own internal dict and migrate the file content
+		 * over to it so it isn't floating around in other translator
+		 * caches.
+		 */
                 if (qr_inode->xattr) {
                         dict_unref (qr_inode->xattr);
                         qr_inode->xattr = NULL;
                         table->cache_used -= qr_inode->stbuf.ia_size;
                 }
 
-                qr_inode->xattr = dict_ref (xdata);
+		qr_inode->xattr = dict_new();
+		if (!qr_inode->xattr) {
+			op_ret = -1;
+			op_errno = ENOMEM;
+			goto unlock;
+		}
+
+		if (dict_set(qr_inode->xattr, GF_CONTENT_KEY, content) < 0) {
+			op_ret = -1;
+			op_errno = ENOMEM;
+			goto unlock;
+		}
+
+		dict_del(xdata, GF_CONTENT_KEY);
+
                 qr_inode->stbuf = *buf;
                 table->cache_used += buf->ia_size;
 
@@ -700,7 +710,6 @@ qr_open (call_frame_t *frame, xlator_t *this, loc_t *loc, int32_t flags,
         LOCK_INIT (&qr_fd_ctx->lock);
         INIT_LIST_HEAD (&qr_fd_ctx->waiting_ops);
         INIT_LIST_HEAD (&qr_fd_ctx->inode_list);
-        INIT_LIST_HEAD (&qr_fd_ctx->tmp_list);
         qr_fd_ctx->fd = fd;
 
         qr_fd_ctx->path = gf_strdup (loc->path);
@@ -3041,7 +3050,7 @@ qr_lk_helper (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         return 0;
 
 unwind:
-        QR_STACK_UNWIND (lk, frame, -1, op_errno, NULL, NULL);
+        QR_STACK_UNWIND (lk, frame, -1, op_errno, lock, xdata);
         return 0;
 }
 
@@ -3165,9 +3174,9 @@ int32_t
 qr_unlink_helper (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                   dict_t *xdata)
 {
-        qr_local_t  *local      = NULL;
-        uint32_t     open_count = 0;
-        qr_fd_ctx_t *fdctx      = NULL, *tmp = NULL;
+        qr_local_t      *local      = NULL;
+        uint32_t         open_count = 0;
+        qr_unlink_ctx_t *unlink_ctx = NULL, *tmp = NULL;
 
         local = frame->local;
 
@@ -3181,15 +3190,39 @@ qr_unlink_helper (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                 goto out;
         }
 
-        list_for_each_entry_safe (fdctx, tmp, &local->fd_list, tmp_list) {
-                fd_unref (fdctx->fd);
+        list_for_each_entry_safe (unlink_ctx, tmp, &local->list, list) {
+                fd_unref (unlink_ctx->fdctx->fd);
+                list_del_init (&unlink_ctx->list);
+                GF_FREE (unlink_ctx);
         }
 
-        STACK_WIND (frame, qr_unlink_cbk, FIRST_CHILD(this),
-                    FIRST_CHILD(this)->fops->unlink, loc, xflag, xdata);
+        if (local->op_ret < 0) {
+                /* unwind even if we couldn't open one fd */
+                QR_STACK_UNWIND (unlink, frame, -1, local->op_errno, NULL, NULL,
+                                 NULL);
+        } else {
+                STACK_WIND (frame, qr_unlink_cbk, FIRST_CHILD(this),
+                            FIRST_CHILD(this)->fops->unlink, loc, xflag, xdata);
+        }
 
 out:
         return 0;
+}
+
+
+qr_unlink_ctx_t *
+qr_unlink_ctx_new ()
+{
+        qr_unlink_ctx_t *ctx = NULL;
+
+        ctx = GF_CALLOC (1, sizeof (*ctx), gf_qr_mt_qr_unlink_ctx_t);
+        if (ctx == NULL) {
+                goto out;
+        }
+
+        INIT_LIST_HEAD (&ctx->list);
+out:
+        return ctx;
 }
 
 
@@ -3199,15 +3232,14 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
 {
         int32_t           op_errno   = -1, ret = -1, op_ret = -1;
         uint64_t          value      = 0;
-        struct list_head  fd_list    = {0, };
         char              need_open  = 0;
         qr_local_t       *local      = NULL;
-        qr_fd_ctx_t      *fdctx      = NULL, *tmp = NULL;
+        qr_fd_ctx_t      *fdctx      = NULL;
         call_frame_t     *open_frame = NULL;
         call_stub_t      *stub       = NULL;
         qr_inode_t       *qr_inode   = NULL;
         uint32_t          open_count = 0;
-        char              ignore     = 0;
+        qr_unlink_ctx_t  *unlink_ctx = NULL;
 
         ret = inode_ctx_get (loc->inode, this, &value);
         if (ret == 0) {
@@ -3218,30 +3250,18 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                 goto wind;
         }
 
-        INIT_LIST_HEAD (&fd_list);
-
         local = qr_local_new (this);
         GF_VALIDATE_OR_GOTO_WITH_ERROR (this->name, local, unwind, op_errno,
                                         ENOMEM);
 
         frame->local = local;
 
+        op_ret = 0;
+
         LOCK (&loc->inode->lock);
         {
                 list_for_each_entry (fdctx, &qr_inode->fd_list, inode_list) {
-                        __fd_ref (fdctx->fd);
-                        list_add_tail (&fdctx->tmp_list, &fd_list);
-                }
-        }
-        UNLOCK (&loc->inode->lock);
-
-        op_ret = 0;
-
-        LOCK (&local->lock);
-        {
-                list_for_each_entry_safe (fdctx, tmp, &fd_list, tmp_list) {
                         need_open = 0;
-                        ignore = 0;
 
                         LOCK (&fdctx->lock);
                         {
@@ -3251,9 +3271,6 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
 
                                 if ((fdctx->opened)
                                     || (strcmp (loc->path, fdctx->path) != 0)) {
-                                        list_del (&fdctx->tmp_list);
-                                        __fd_unref (fdctx->fd);
-                                        ignore = 1;
                                         goto unlock;
                                 }
 
@@ -3264,6 +3281,14 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                                 }
 
                                 if (!fdctx->opened) {
+                                        unlink_ctx = qr_unlink_ctx_new ();
+                                        if (unlink_ctx == NULL) {
+                                                op_ret = -1;
+                                                op_errno = ENOMEM;
+                                                fdctx->open_in_transit = 0;
+                                                goto unlock;
+                                        }
+
                                         stub = fop_unlink_stub (frame,
                                                                 qr_unlink_helper,
                                                                 loc, xflag,
@@ -3272,14 +3297,21 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                                                 op_ret = -1;
                                                 op_errno = ENOMEM;
                                                 fdctx->open_in_transit = 0;
+                                                GF_FREE (unlink_ctx);
                                                 goto unlock;
                                         }
 
                                         list_add_tail (&stub->list,
                                                        &fdctx->waiting_ops);
-                                }
 
-                                local->open_count++;
+                                        local->open_count++;
+
+                                        unlink_ctx->need_open = need_open;
+                                        __fd_ref (fdctx->fd);
+                                        unlink_ctx->fdctx = fdctx;
+                                        list_add_tail (&unlink_ctx->list,
+                                                       &local->list);
+                                }
                         }
                 unlock:
                         UNLOCK (&fdctx->lock);
@@ -3287,16 +3319,11 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                         if (op_ret == -1) {
                                 break;
                         }
-
-                        if (!need_open && !ignore) {
-                                list_move_tail (&fdctx->tmp_list,
-                                                &local->fd_list);
-                        }
                 }
 
                 open_count = local->open_count;
         }
-        UNLOCK (&local->lock);
+        UNLOCK (&loc->inode->lock);
 
         if (op_ret == -1) {
                 goto unwind;
@@ -3306,13 +3333,17 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
                 goto wind;
         }
 
-        list_for_each_entry_safe (fdctx, tmp, &fd_list, tmp_list) {
-                LOCK (&local->lock);
-                {
-                        list_move_tail (&fdctx->tmp_list, &local->fd_list);
+        /* no need to hold local->lock, since we are gaurded by condition
+         * local->open_count cannot be zero till we send open on
+         * all the required fds. qr_unlink_helper will not modify
+         * local->list till local->open_count becomes 0.
+         */
+        list_for_each_entry (unlink_ctx, &local->list, list) {
+                if (!unlink_ctx->need_open) {
+                        continue;
                 }
-                UNLOCK (&local->lock);
 
+                fdctx = unlink_ctx->fdctx;
                 open_frame = create_frame (this, this->ctx->pool);
                 if (open_frame == NULL) {
                         qr_resume_pending_ops (fdctx, -1, ENOMEM);
@@ -3327,7 +3358,14 @@ qr_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc, int xflag,
         return 0;
 
 unwind:
-        QR_STACK_UNWIND (unlink, frame, -1, op_errno, NULL, NULL, NULL);
+        if (local && !list_empty (&local->list)) {
+                list_for_each_entry (unlink_ctx, &local->list, list) {
+                        qr_resume_pending_ops (unlink_ctx->fdctx, -1, op_errno);
+                }
+        } else {
+                QR_STACK_UNWIND (unlink, frame, -1, op_errno, NULL, NULL, NULL);
+        }
+
         return 0;
 
 wind:

@@ -763,7 +763,10 @@ glusterd_brickinfo_from_brick (char *brick,
         GF_ASSERT (path);
 
         ret = glusterd_brickinfo_new (&new_brickinfo);
+        if (ret)
+                goto out;
 
+        ret = gf_canonicalize_path (path);
         if (ret)
                 goto out;
 
@@ -911,8 +914,11 @@ glusterd_friend_cleanup (glusterd_peerinfo_t *peerinfo)
                 peerinfo->rpc->mydata = NULL;
                 peerinfo->rpc = rpc_clnt_unref (peerinfo->rpc);
                 peerinfo->rpc = NULL;
-                if (peerctx)
+                if (peerctx) {
+                        if (peerctx->errstr)
+                                GF_FREE (peerctx->errstr);
                         GF_FREE (peerctx);
+                }
         }
         glusterd_peer_destroy (peerinfo);
 
@@ -2420,7 +2426,8 @@ glusterd_delete_stale_volume (glusterd_volinfo_t *stale_volinfo,
          * stop stale bricks. Stale volume information is going to be deleted.
          * Which deletes the valid brick information inside stale volinfo.
          * We dont want brick_rpc_notify to access already deleted brickinfo.
-         * Disconnect valid bricks.
+         * Disconnect all bricks from stale_volinfo (unconditionally), since
+         * they are being deleted subsequently.
          */
         if (glusterd_is_volume_started (stale_volinfo)) {
                 if (glusterd_is_volume_started (valid_volinfo)) {
@@ -2429,10 +2436,12 @@ glusterd_delete_stale_volume (glusterd_volinfo_t *stale_volinfo,
                         //Only valid bricks will be running now.
                         (void) glusterd_volinfo_copy_brick_portinfo (valid_volinfo,
                                                                      stale_volinfo);
-                        (void) glusterd_volume_disconnect_all_bricks (stale_volinfo);
+
                 } else {
                         (void) glusterd_stop_bricks (stale_volinfo);
                 }
+
+                (void) glusterd_volume_disconnect_all_bricks (stale_volinfo);
         }
         /* Delete all the bricks and stores and vol files. They will be created
          * again by the valid_volinfo. Volume store delete should not be
@@ -3181,6 +3190,28 @@ glusterd_reconfigure_shd ()
 }
 
 int
+glusterd_reconfigure_nfs ()
+{
+        int             ret             = -1;
+        gf_boolean_t    identical       = _gf_false;
+
+        ret = glusterd_check_nfs_volfile_identical (&identical);
+        if (ret)
+                goto out;
+
+        if (identical) {
+                ret = 0;
+                goto out;
+        }
+
+        ret = glusterd_check_generate_start_nfs ();
+
+out:
+        return ret;
+}
+
+
+int
 glusterd_check_generate_start_nfs ()
 {
         int ret = 0;
@@ -3304,7 +3335,7 @@ int
 glusterd_nodesvcs_handle_reconfigure (glusterd_volinfo_t *volinfo)
 {
         return glusterd_nodesvcs_batch_op (volinfo,
-                                           glusterd_check_generate_start_nfs,
+                                           glusterd_reconfigure_nfs,
                                            glusterd_reconfigure_shd);
 }
 
@@ -4345,127 +4376,165 @@ glusterd_rb_check_bricks (glusterd_volinfo_t *volinfo,
         return 0;
 }
 
-int
-glusterd_brick_create_path (char *host, char *path, uuid_t uuid, mode_t mode,
-                            char **op_errstr)
+/*path needs to be absolute; works only on gfid, volume-id*/
+static int
+glusterd_is_uuid_present (char *path, char *xattr, gf_boolean_t *present)
 {
-        int     ret = -1;
-        char    msg[2048] = {0};
-        struct  stat st_buf = {0};
-        uuid_t  gfid = {0,};
-        uuid_t  old_uuid = {0,};
-        char    old_uuid_buf[64] = {0,};
+        GF_ASSERT (path);
+        GF_ASSERT (xattr);
+        GF_ASSERT (present);
 
-        ret = stat (path, &st_buf);
-        if ((!ret) && (!S_ISDIR (st_buf.st_mode))) {
-                snprintf (msg, sizeof (msg), "brick %s:%s, "
-                          "path %s is not a directory", host, path, path);
-                gf_log ("", GF_LOG_ERROR, "%s", msg);
-                ret = -1;
+        int     ret      = -1;
+        uuid_t  uid     = {0,};
+
+        if (!path || !xattr || !present)
                 goto out;
-        } else if (!ret) {
-                goto check_xattr;
-        } else {
-                ret = mkdir (path, mode);
-                if (ret) {
-                        snprintf (msg, sizeof (msg), "brick: %s:%s, path "
-                                  "creation failed, reason: %s",
-                                  host, path, strerror(errno));
-                        gf_log ("glusterd", GF_LOG_ERROR, "%s", msg);
+
+        ret = sys_lgetxattr (path, xattr, &uid, 16);
+
+        if (ret >= 0) {
+                *present = _gf_true;
+                ret = 0;
+                goto out;
+        }
+                
+        switch (errno) {
+#if defined(ENODATA)
+                case ENODATA: /* FALLTHROUGH */
+#endif
+#if defined(ENOATTR) && (ENOATTR != ENODATA)
+                case ENOATTR: /* FALLTHROUGH */
+#endif
+                case ENOTSUP:
+                        *present = _gf_false;
+                        ret = 0;
+                        break;
+                default:
+                        break;
+        }
+out:
+        return ret;
+}
+
+/*path needs to be absolute*/
+static int
+glusterd_is_path_in_use (char *path, gf_boolean_t *in_use, char **op_errstr)
+{
+        int             i               = 0;
+        int             ret             = -1;
+        gf_boolean_t    used            = _gf_false;
+        char            dir[PATH_MAX]   = {0,};
+        char            *curdir         = NULL;
+        char            msg[2048]       = {0};
+        char            *keys[3]         = {GFID_XATTR_KEY,
+                                            GF_XATTR_VOL_ID_KEY,
+                                            NULL};
+
+        GF_ASSERT (path);
+        if (!path)
+                goto out;
+
+        strcpy (dir, path);
+        curdir = dir;
+        do {
+                for (i = 0; !used && keys[i]; i++) {
+                        ret = glusterd_is_uuid_present (curdir, keys[i], &used);
+                        if (ret)
+                                goto out;
+                }
+
+                if (used)
+                        break;
+
+                curdir = dirname (curdir);
+                if (!strcmp (curdir, "."))
                         goto out;
-                } else {
-                        goto check_xattr;
+
+
+        } while (strcmp (curdir, "/"));
+
+        if (!strcmp (curdir, "/")) {
+                for (i = 0; !used && keys[i]; i++) {
+                        ret = glusterd_is_uuid_present (curdir, keys[i], &used);
+                        if (ret)
+                                goto out;
                 }
         }
 
-/* To check if filesystem is read-only
-   and if it supports extended attributes */
-check_xattr:
+        ret = 0;
+        *in_use = used;
+out:
+        if (ret) {
+                snprintf (msg, sizeof (msg), "Failed to get extended "
+                          "attribute %s, reason: %s", keys[i],
+                          strerror (errno));
+        }
+
+        if (*in_use) {
+                snprintf (msg, sizeof (msg), "%s or a prefix of it is "
+                          "already part of a volume", path);
+        }
+
+        if (strlen (msg)) {
+                gf_log (THIS->name, GF_LOG_ERROR, "%s", msg);
+                *op_errstr = gf_strdup (msg);
+        }
+
+        return ret;
+}
+
+int
+glusterd_brick_create_path (char *host, char *path, uuid_t uuid,
+                            char **op_errstr)
+{
+        int             ret             = -1;
+        char            msg[2048]       = {0,};
+        gf_boolean_t    in_use          = _gf_false;
+
+        ret = mkdir_p (path, 0777, _gf_true);
+        if (ret)
+                goto out;
+
+        /* Check for xattr support in backend fs */
         ret = sys_lsetxattr (path, "trusted.glusterfs.test",
                              "working", 8, 0);
         if (ret) {
-                snprintf (msg, sizeof (msg), "glusterfs is not"
+                snprintf (msg, sizeof (msg), "Glusterfs is not"
                           " supported on brick: %s:%s.\nSetting"
                           " extended attributes failed, reason:"
                           " %s.", host, path, strerror(errno));
-                gf_log ("glusterd", GF_LOG_ERROR, "%s", msg);
                 goto out;
+
         } else {
-                /* Remove xattr *cannot* fail after setting it succeeded */
                 sys_lremovexattr (path, "trusted.glusterfs.test");
+
         }
 
-        /* Now check if the export directory has some other 'gfid',
-           other than that of root '/' */
-        ret = sys_lgetxattr (path, "trusted.gfid", gfid, 16);
-        if (ret == 16) {
-                if (!__is_root_gfid (gfid)) {
-                        gf_log (THIS->name, GF_LOG_WARNING,
-                                "%s: gfid (%s) is not that of glusterfs '/' ",
-                                path, uuid_utoa (gfid));
-                        snprintf (msg, sizeof (msg),
-                                  "'%s:%s' gfid (%s) is not that of "
-                                  "glusterfs '/' ", host, path, uuid_utoa (gfid));
-                        ret = -1;
-                        goto out;
-                }
-        } else if (ret != -1) {
-                /* Wrong 'gfid' is set, it should be error */
+        ret = glusterd_is_path_in_use (path, &in_use, op_errstr);
+        if (ret)
+                goto out;
+
+        if (in_use) {
                 ret = -1;
-                snprintf (msg, sizeof (msg), "'%s:%s' has wrong entry"
-                          "for 'gfid'.", host, path);
-                goto out;
-        } else if ((ret == -1) && (errno != ENODATA)) {
-                /* Wrong 'gfid' is set, it should be error */
-                snprintf (msg, sizeof (msg), "'%s:%s' has failed to fetch "
-                          "'gfid' (%s)", host, path, strerror (errno));
                 goto out;
         }
 
-        ret = 0;
-        if (!uuid)
+        ret = sys_lsetxattr (path, GF_XATTR_VOL_ID_KEY, uuid, 16,
+                             XATTR_CREATE);
+        if (ret) {
+                snprintf (msg, sizeof (msg), "Failed to set extended "
+                          "attributes %s, reason: %s",
+                          GF_XATTR_VOL_ID_KEY, strerror (errno));
                 goto out;
-
-        /* This 'key' is set when the volume is started for the first time */
-        ret = sys_lgetxattr (path, "trusted.glusterfs.volume-id",
-                             old_uuid, 16);
-        if (ret == 16) {
-                if (uuid_compare (old_uuid, uuid)) {
-                        uuid_utoa_r (old_uuid, old_uuid_buf);
-                        gf_log (THIS->name, GF_LOG_WARNING,
-                                "%s: mismatching volume-id (%s) received. "
-                                "already is a part of volume %s ",
-                                path, uuid_utoa (uuid), old_uuid_buf);
-                        snprintf (msg, sizeof (msg), "'%s:%s' has been part of "
-                                  "a deleted volume with id %s. Please "
-                                  "re-create the brick directory.",
-                                  host, path, old_uuid_buf);
-                        ret = -1;
-                        goto out;
-                }
-        } else if (ret != -1) {
-                /* Wrong 'volume-id' is set, it should be error */
-                ret = -1;
-                snprintf (msg, sizeof (msg), "'%s:%s' has wrong entry"
-                          "for 'volume-id'.", host, path);
-                goto out;
-        } else if ((ret == -1) && (errno != ENODATA)) {
-                /* Wrong 'volume-id' is set, it should be error */
-                snprintf (msg, sizeof (msg), "'%s:%s' : failed to fetch "
-                          "'volume-id' (%s)", host, path, strerror (errno));
-                goto out;
-
         }
-        /* if 'ret == -1' then 'volume-id' not set, seems to be a fresh
-           directory */
 
         ret = 0;
 out:
-        if (msg[0] != '\0')
+        if (strlen (msg))
                 *op_errstr = gf_strdup (msg);
 
-        gf_log ("", GF_LOG_DEBUG, "returning %d", ret);
         return ret;
+
 }
 
 int
@@ -4807,22 +4876,6 @@ glusterd_delete_all_bricks (glusterd_volinfo_t* volinfo)
 }
 
 int
-mkdir_if_missing (char *path)
-{
-        struct stat st = {0,};
-        int        ret = 0;
-
-        ret = mkdir (path, 0777);
-        if (!ret || errno == EEXIST)
-                ret = stat (path, &st);
-        if (ret == -1 || !S_ISDIR (st.st_mode))
-                gf_log ("", GF_LOG_WARNING, "Failed to create the"
-                        " directory %s", path);
-
-        return ret;
-}
-
-int
 glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
                       char *glusterd_uuid_str, char **op_errstr)
 {
@@ -4849,7 +4902,7 @@ glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
                 goto out;
 
         snprintf (buf, PATH_MAX, "%s/"GEOREP"/%s", priv->workdir, master_vol->volname);
-        ret = mkdir_if_missing (buf);
+        ret = mkdir_p (buf, 0777, _gf_true);
         if (ret) {
                 errcode = -1;
                 goto out;
@@ -4857,7 +4910,7 @@ glusterd_start_gsync (glusterd_volinfo_t *master_vol, char *slave,
 
         snprintf (buf, PATH_MAX, DEFAULT_LOG_FILE_DIRECTORY"/"GEOREP"/%s",
                   master_vol->volname);
-        ret = mkdir_if_missing (buf);
+        ret = mkdir_p (buf, 0777, _gf_true);
         if (ret) {
                 errcode = -1;
                 goto out;
@@ -5344,6 +5397,20 @@ glusterd_restart_rebalance (glusterd_conf_t *conf)
         return ret;
 }
 
+
+void
+glusterd_volinfo_reset_defrag_stats (glusterd_volinfo_t *volinfo)
+{
+        GF_ASSERT (volinfo);
+
+        volinfo->rebalance_files = 0;
+        volinfo->rebalance_data = 0;
+        volinfo->lookedup_files = 0;
+        volinfo->rebalance_failures = 0;
+        volinfo->rebalance_time = 0;
+
+}
+
 /* Return hostname for given uuid if it exists
  * else return NULL
  */
@@ -5430,6 +5497,7 @@ glusterd_defrag_volume_status_update (glusterd_volinfo_t *volinfo,
         gf_defrag_status_t              status = GF_DEFRAG_STATUS_NOT_STARTED;
         uint64_t                        failures = 0;
         xlator_t                       *this = NULL;
+        double                          run_time = 0;
 
         this = THIS;
 
@@ -5458,6 +5526,11 @@ glusterd_defrag_volume_status_update (glusterd_volinfo_t *volinfo,
                 gf_log (this->name, GF_LOG_TRACE,
                         "failed to get failure count");
 
+        ret = dict_get_double (rsp_dict, "run-time", &run_time);
+        if (ret)
+                gf_log (this->name, GF_LOG_TRACE,
+                        "failed to get run-time");
+
         if (files)
                 volinfo->rebalance_files = files;
         if (size)
@@ -5468,6 +5541,65 @@ glusterd_defrag_volume_status_update (glusterd_volinfo_t *volinfo,
                 volinfo->defrag_status = status;
         if (failures)
                 volinfo->rebalance_failures = failures;
+        if (run_time)
+                volinfo->rebalance_time = run_time;
 
+        return ret;
+}
+
+int
+glusterd_check_files_identical (char *filename1, char *filename2,
+                                gf_boolean_t *identical)
+{
+        int                     ret = -1;
+        struct stat             buf1 = {0,};
+        struct stat             buf2 = {0,};
+        uint32_t                cksum1 = 0;
+        uint32_t                cksum2 = 0;
+        xlator_t                *this = NULL;
+
+        GF_ASSERT (filename1);
+        GF_ASSERT (filename2);
+        GF_ASSERT (identical);
+
+        this = THIS;
+
+        ret = stat (filename1, &buf1);
+
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "stat on file: %s failed "
+                        "(%s)", filename1, strerror (errno));
+                goto out;
+        }
+
+        ret = stat (filename2, &buf2);
+
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "stat on file: %s failed "
+                        "(%s)", filename2, strerror (errno));
+                goto out;
+        }
+
+        if (buf1.st_size != buf2.st_size) {
+                *identical = _gf_false;
+                goto out;
+        }
+
+        ret = get_checksum_for_path (filename1, &cksum1);
+        if (ret)
+                goto out;
+
+
+        ret = get_checksum_for_path (filename2, &cksum2);
+        if (ret)
+                goto out;
+
+        if (cksum1 != cksum2)
+                *identical = _gf_false;
+        else
+                *identical = _gf_true;
+
+out:
+        gf_log (this->name, GF_LOG_DEBUG, "Returning with %d", ret);
         return ret;
 }

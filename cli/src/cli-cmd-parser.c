@@ -80,7 +80,7 @@ cli_cmd_bricks_parse (const char **words, int wordcount, int brick_index,
                         goto out;
                 } else {
                         delimiter = strrchr (words[brick_index], ':');
-                        ret = cli_canonicalize_path (delimiter + 1);
+                        ret = gf_canonicalize_path (delimiter + 1);
                         if (ret)
                                 goto out;
                 }
@@ -523,16 +523,26 @@ cli_cmd_quota_parse (const char **words, int wordcount, dict_t **options)
                 goto out;
         }
 
-        if ((strcmp (w, "enable")) == 0 && wordcount == 4) {
-                type = GF_QUOTA_OPTION_TYPE_ENABLE;
-                ret = 0;
-                goto set_type;
+        if (strcmp (w, "enable") == 0) {
+                if (wordcount == 4) {
+                        type = GF_QUOTA_OPTION_TYPE_ENABLE;
+                        ret = 0;
+                        goto set_type;
+                } else {
+                        ret = -1;
+                        goto out;
+                }
         }
 
-        if (strcmp (w, "disable") == 0 && wordcount == 4) {
-                type = GF_QUOTA_OPTION_TYPE_DISABLE;
-                ret = 0;
-                goto set_type;
+        if (strcmp (w, "disable") == 0) {
+                if (wordcount == 4) {
+                        type = GF_QUOTA_OPTION_TYPE_DISABLE;
+                        ret = 0;
+                        goto set_type;
+                } else {
+                        ret = -1;
+                        goto out;
+                }
         }
 
         if (strcmp (w, "limit-usage") == 0) {
@@ -969,7 +979,7 @@ cli_cmd_volume_remove_brick_parse (const char **words, int wordcount,
                         goto out;
                 } else {
                         delimiter = strrchr(words[brick_index], ':');
-                        ret = cli_canonicalize_path (delimiter + 1);
+                        ret = gf_canonicalize_path (delimiter + 1);
                         if (ret)
                                 goto out;
                 }
@@ -1063,7 +1073,7 @@ cli_cmd_volume_replace_brick_parse (const char **words, int wordcount,
                 goto out;
         } else {
                 delimiter = strrchr ((char *)words[3], ':');
-                ret = cli_canonicalize_path (delimiter + 1);
+                ret = gf_canonicalize_path (delimiter + 1);
                 if (ret)
                         goto out;
         }
@@ -1084,7 +1094,7 @@ cli_cmd_volume_replace_brick_parse (const char **words, int wordcount,
                 goto out;
         } else {
                 delimiter = strrchr ((char *)words[4], ':');
-                ret = cli_canonicalize_path (delimiter + 1);
+                ret = gf_canonicalize_path (delimiter + 1);
                 if (ret)
                         goto out;
         }
@@ -1192,7 +1202,7 @@ cli_cmd_log_filename_parse (const char **words, int wordcount, dict_t **options)
                         ret = -1;
                         goto out;
                 } else {
-                        ret = cli_canonicalize_path (delimiter + 1);
+                        ret = gf_canonicalize_path (delimiter + 1);
                         if (ret)
                                 goto out;
                 }
@@ -1308,7 +1318,7 @@ cli_cmd_log_locate_parse (const char **words, int wordcount, dict_t **options)
                         ret = -1;
                         goto out;
                 } else {
-                        ret = cli_canonicalize_path (delimiter + 1);
+                        ret = gf_canonicalize_path (delimiter + 1);
                         if (ret)
                                 goto out;
                 }
@@ -1359,7 +1369,7 @@ cli_cmd_log_rotate_parse (const char **words, int wordcount, dict_t **options)
                         ret = -1;
                         goto out;
                 } else {
-                        ret = cli_canonicalize_path (delimiter + 1);
+                        ret = gf_canonicalize_path (delimiter + 1);
                         if (ret)
                                 goto out;
                 }
@@ -1662,7 +1672,7 @@ cli_cmd_volume_top_parse (const char **words, int wordcount,
         char    *delimiter      = NULL;
         char    *opwords[]      = { "open", "read", "write", "opendir",
                                     "readdir", "read-perf", "write-perf",
-                                    NULL };
+                                    "clear", NULL };
         char    *w = NULL;
 
         GF_ASSERT (words);
@@ -1707,6 +1717,13 @@ cli_cmd_volume_top_parse (const char **words, int wordcount,
         } else if (strcmp (w, "write-perf") == 0) {
                 top_op = GF_CLI_TOP_WRITE_PERF;
                 perf = 1;
+        } else if (strcmp (w, "clear") == 0) {
+                ret = dict_set_int32 (dict, "clear-stats", 1);
+                if (ret) {
+                        gf_log ("cli", GF_LOG_ERROR,
+                                "Could not set clear-stats in dict");
+                        goto out;
+                }
         } else
                 GF_ASSERT (!"opword mismatch");
         ret = dict_set_int32 (dict, "top-op", (int32_t)top_op);
@@ -1741,7 +1758,7 @@ cli_cmd_volume_top_parse (const char **words, int wordcount,
                                 ret = -1;
                                 goto out;
                         } else {
-                                ret = cli_canonicalize_path (delimiter + 1);
+                                ret = gf_canonicalize_path (delimiter + 1);
                                 if (ret)
                                         goto out;
                         }

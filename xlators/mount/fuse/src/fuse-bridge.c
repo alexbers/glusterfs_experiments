@@ -26,7 +26,7 @@ static int gf_fuse_xattr_enotsup_log;
 void fini (xlator_t *this_xl);
 
 fuse_fd_ctx_t *
-__fuse_fd_ctx_check_n_create (fd_t *fd, xlator_t *this)
+__fuse_fd_ctx_check_n_create (xlator_t *this, fd_t *fd)
 {
         uint64_t       val    = 0;
         int32_t        ret    = 0;
@@ -54,7 +54,7 @@ __fuse_fd_ctx_check_n_create (fd_t *fd, xlator_t *this)
 }
 
 fuse_fd_ctx_t *
-fuse_fd_ctx_check_n_create (fd_t *fd, xlator_t *this)
+fuse_fd_ctx_check_n_create (xlator_t *this, fd_t *fd)
 {
         fuse_fd_ctx_t *fd_ctx = NULL;
 
@@ -64,7 +64,7 @@ fuse_fd_ctx_check_n_create (fd_t *fd, xlator_t *this)
 
         LOCK (&fd->lock);
         {
-                fd_ctx = __fuse_fd_ctx_check_n_create (fd, this);
+                fd_ctx = __fuse_fd_ctx_check_n_create (this, fd);
         }
         UNLOCK (&fd->lock);
 
@@ -618,7 +618,7 @@ fuse_fd_inherit_directio (xlator_t *this, fd_t *fd, struct fuse_open_out *foo)
         GF_VALIDATE_OR_GOTO_WITH_ERROR ("glusterfs-fuse", foo, out, ret,
                                         -EINVAL);
 
-        fdctx = fuse_fd_ctx_check_n_create (fd, this);
+        fdctx = fuse_fd_ctx_check_n_create (this, fd);
         if (!fdctx) {
                 ret = -ENOMEM;
                 goto out;
@@ -2351,6 +2351,7 @@ fuse_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 fde = (struct fuse_dirent *)(buf + size);
                 fde->ino = entry->d_ino;
                 fde->off = entry->d_off;
+                fde->type = entry->d_type;
                 fde->namelen = strlen (entry->d_name);
                 strncpy (fde->name, entry->d_name, fde->namelen);
                 size += FUSE_DIRENT_SIZE (fde);
@@ -3186,11 +3187,10 @@ fuse_setlk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         gf_log ("glusterfs-fuse", GF_LOG_DEBUG,
                                 "Returning EAGAIN Flock: "
                                 "start=%llu, len=%llu, pid=%llu, lk-owner=%s",
-                                (unsigned long long) lock->l_start,
-                                (unsigned long long) lock->l_len,
-                                (unsigned long long) lock->l_pid,
+                                (unsigned long long) state->lk_lock.l_start,
+                                (unsigned long long) state->lk_lock.l_len,
+                                (unsigned long long) state->lk_lock.l_pid,
                                 lkowner_utoa (&frame->root->lk_owner));
-
                 } else  {
                         gf_log ("glusterfs-fuse", GF_LOG_WARNING,
                                 "%"PRIu64": ERR => -1 (%s)",
@@ -3507,6 +3507,7 @@ fuse_nameless_lookup (xlator_t *xl, uuid_t gfid, loc_t *loc)
         int          ret          = -1;
         dict_t      *xattr_req    = NULL;
         struct iatt  iatt         = {0, };
+        inode_t     *linked_inode = NULL;
 
         if ((loc == NULL) || (xl == NULL)) {
                 goto out;
@@ -3531,7 +3532,9 @@ fuse_nameless_lookup (xlator_t *xl, uuid_t gfid, loc_t *loc)
                 goto out;
         }
 
-        inode_link (loc->inode, NULL, NULL, &iatt);
+        linked_inode = inode_link (loc->inode, NULL, NULL, &iatt);
+        inode_unref (loc->inode);
+        loc->inode = linked_inode;
 
         ret = 0;
 out:
@@ -3590,13 +3593,17 @@ fuse_migrate_fd (xlator_t *this, fd_t *fd, xlator_t *old_subvol,
         loc.path = "";
         loc.name = NULL;
 
-        ret = fuse_nameless_lookup (new_subvol, fd->inode->gfid, &loc);
-        if (ret < 0) {
-                ret = -2;
-                gf_log ("glusterfs-fuse", GF_LOG_WARNING,
-                        "name-less lookup of gfid (%s) failed (%s)",
-                        uuid_utoa (fd->inode->gfid), strerror (errno));
-                goto out;
+        loc.inode = inode_find (new_subvol->itable, fd->inode->gfid);
+
+        if (loc.inode == NULL) {
+                ret = fuse_nameless_lookup (new_subvol, fd->inode->gfid, &loc);
+                if (ret < 0) {
+                        gf_log ("glusterfs-fuse", GF_LOG_WARNING,
+                                "name-less lookup of gfid (%s) failed (%s)",
+                                uuid_utoa (fd->inode->gfid), strerror (errno));
+                        goto out;
+                }
+
         }
 
         old_inode = fd->inode;
@@ -3670,34 +3677,13 @@ fuse_handle_opened_fds (xlator_t *this, xlator_t *old_subvol,
                                 continue;
 
                         ret = fuse_migrate_fd (this, fd, old_subvol,
-                                                       new_subvol);
-                        if (ret < 0) {
-                                if (ret == -1) {
-                                        fdctx = fuse_fd_ctx_check_n_create (fd,
-                                                                         this);
-                                        if (fdctx != NULL) {
-                                                fdctx->migration_failed = 1;
-                                                gf_log_callingfn ("glusterfs-"
-                                                                  "fuse",
-                                                                  GF_LOG_ERROR,
-                                                                  "fd migration"
-                                                                  " for the fd "
-                                                                  "(%p), with"
-                                                                  "context (%p)"
-                                                                  " failed", fd,
-                                                                  fdctx);
-                                        }
+                                               new_subvol);
+
+                        fdctx = fuse_fd_ctx_check_n_create (this, fd);
+                        if (fdctx) {
+                                if (ret < 0) {
+                                        fdctx->migration_failed = 1;
                                 } else {
-                                        /* nameless lookup has failed,
-                                         * it can be identified using
-                                         * fd->inode->table->xl
-                                         * != active_subvol. so, do
-                                         * nothing
-                                         */
-                                }
-                        } else {
-                                fdctx = fuse_fd_ctx_get (this, fd);
-                                if (fdctx != NULL) {
                                         fdctx->migration_failed = 0;
                                 }
                         }
@@ -3708,6 +3694,7 @@ fuse_handle_opened_fds (xlator_t *this, xlator_t *old_subvol,
                         if (fd)
                                 fd_unref (fd);
                 }
+
                 GF_FREE (fdentries);
         }
 
@@ -3880,29 +3867,17 @@ int
 fuse_get_mount_status (xlator_t *this)
 {
         int             kid_status = -1;
-        pid_t           kid_pid = -1;
         fuse_private_t *priv = this->private;
-        int             our_status = -1;
 
         if (read(priv->status_pipe[0],&kid_status, sizeof(kid_status)) < 0) {
                 gf_log (this->name, GF_LOG_ERROR, "could not get mount status");
-                goto out;
+                kid_status = -1;
         }
         gf_log (this->name, GF_LOG_DEBUG, "mount status is %d", kid_status);
 
-        if (read(priv->status_pipe[0],&kid_pid, sizeof(kid_pid)) < 0) {
-                gf_log (this->name, GF_LOG_ERROR, "could not get mount PID");
-                goto out;
-        }
-        gf_log (this->name, GF_LOG_DEBUG, "mount PID is %d", kid_pid);
-
-        (void)waitpid(kid_pid,NULL,0);
-        our_status = kid_status;
-
-out:
         close(priv->status_pipe[0]);
         close(priv->status_pipe[1]);
-        return our_status;
+        return kid_status;
 }
 
 static void *
@@ -4385,7 +4360,7 @@ init (xlator_t *this_xl)
         int                xl_name_allocated = 0;
         int                fsname_allocated = 0;
         glusterfs_ctx_t   *ctx = NULL;
-        gf_boolean_t       sync_mtab = _gf_false;
+        gf_boolean_t       sync_to_mount = _gf_false;
         char              *mnt_args = NULL;
 
         if (this_xl == NULL)
@@ -4533,11 +4508,11 @@ init (xlator_t *this_xl)
                 priv->fuse_dump_fd = ret;
         }
 
-        sync_mtab = _gf_false;
-        ret = dict_get_str (options, "sync-mtab", &value_string);
+        sync_to_mount = _gf_false;
+        ret = dict_get_str (options, "sync-to-mount", &value_string);
         if (ret == 0) {
                 ret = gf_string2boolean (value_string,
-                                         &sync_mtab);
+                                         &sync_to_mount);
                 GF_ASSERT (ret == 0);
         }
 
@@ -4583,7 +4558,7 @@ init (xlator_t *this_xl)
         }
 
         priv->fd = gf_fuse_mount (priv->mount_point, fsname, mnt_args,
-                                  sync_mtab ? &ctx->mtab_pid : NULL,
+                                  sync_to_mount ? &ctx->mnt_pid : NULL,
                                   priv->status_pipe[1]);
         if (priv->fd == -1)
                 goto cleanup_exit;
@@ -4648,9 +4623,9 @@ fini (xlator_t *this_xl)
                 gf_log (this_xl->name, GF_LOG_INFO,
                         "Unmounting '%s'.", mount_point);
 
-                dict_del (this_xl->options, ZR_MOUNTPOINT_OPT);
                 gf_fuse_unmount (mount_point, priv->fd);
                 close (priv->fuse_dump_fd);
+                dict_del (this_xl->options, ZR_MOUNTPOINT_OPT);
         }
         /* Process should terminate once fuse xlator is finished.
          * Required for AUTH_FAILED event.
@@ -4695,7 +4670,7 @@ struct volume_options options[] = {
         { .key  = {"uid-map-root"},
           .type = GF_OPTION_TYPE_INT
         },
-        { .key  = {"sync-mtab"},
+        { .key  = {"sync-to-mount"},
           .type = GF_OPTION_TYPE_BOOL
         },
         { .key = {"read-only"},

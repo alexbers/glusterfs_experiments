@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2007-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -65,12 +56,20 @@ afr_build_parent_loc (loc_t *parent, loc_t *child, int32_t *op_errno)
                         *op_errno = ENOMEM;
                 goto out;
         }
-        parent->path = dirname (child_path);
+        parent->path = gf_strdup( dirname (child_path) );
+	if (!parent->path) {
+                if (op_errno)
+                        *op_errno = ENOMEM;
+                goto out;
+        }
         parent->inode  = inode_ref (child->parent);
         uuid_copy (parent->gfid, child->pargfid);
 
         ret = 0;
 out:
+	if (child_path)
+		GF_FREE(child_path);
+
         return ret;
 }
 

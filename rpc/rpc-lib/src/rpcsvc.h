@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _RPCSVC_H
@@ -287,7 +278,8 @@ struct rpcsvc_request {
 typedef int (*rpcsvc_actor) (rpcsvc_request_t *req);
 typedef int (*rpcsvc_vector_actor) (rpcsvc_request_t *req, struct iovec *vec,
                                     int count, struct iobref *iobref);
-typedef int (*rpcsvc_vector_sizer) (int state, ssize_t *readsize, char *addr);
+typedef int (*rpcsvc_vector_sizer) (int state, ssize_t *readsize,
+                                    char *base_addr, char *curr_addr);
 
 /* Every protocol actor will also need to specify the function the RPC layer
  * will use to serialize or encode the message into XDR format just before

@@ -225,6 +225,7 @@ glusterd3_1_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 if (ctx->req) {
                         glusterd_xfer_cli_probe_resp (ctx->req, rsp.op_ret,
                                                       rsp.op_errno,
+                                                      rsp.op_errstr,
                                                       ctx->hostname, ctx->port);
                 }
 
@@ -252,6 +253,7 @@ glusterd3_1_probe_cbk (struct rpc_req *req, struct iovec *iov,
                 if (ctx->req) {
                         glusterd_xfer_cli_probe_resp (ctx->req, rsp.op_ret,
                                                       rsp.op_errno,
+                                                      rsp.op_errstr,
                                                       ctx->hostname, ctx->port);
                 }
 
@@ -372,7 +374,8 @@ out:
 
         if (ctx->req)//reverse probe doesn't have req
                 ret = glusterd_xfer_cli_probe_resp (ctx->req, op_ret, op_errno,
-                                                    ctx->hostname, ctx->port);
+                                                    NULL, ctx->hostname,
+                                                    ctx->port);
         if (!ret) {
                 glusterd_friend_sm ();
                 glusterd_op_sm ();
@@ -462,7 +465,7 @@ inject:
 
 
 respond:
-        ret = glusterd_xfer_cli_deprobe_resp (ctx->req, op_ret, op_errno,
+        ret = glusterd_xfer_cli_deprobe_resp (ctx->req, op_ret, op_errno, NULL,
                                               ctx->hostname);
         if (!ret && move_sm_now) {
                 glusterd_friend_sm ();
@@ -1115,6 +1118,7 @@ glusterd_volume_rebalance_use_rsp_dict (dict_t *rsp_dict)
         int32_t        i        = 0;
         char          *node_uuid = NULL;
         char          *node_uuid_str = NULL;
+        double         elapsed_time = 0;
 
         GF_ASSERT (rsp_dict);
 
@@ -1223,6 +1227,19 @@ glusterd_volume_rebalance_use_rsp_dict (dict_t *rsp_dict)
                 if (ret) {
                         gf_log (THIS->name, GF_LOG_DEBUG,
                                 "failed to set failure count");
+                }
+        }
+
+        memset (key, 0, 256);
+        snprintf (key, 256, "run-time-%d", index);
+        ret = dict_get_double (rsp_dict, key, &elapsed_time);
+        if (!ret) {
+                memset (key, 0, 256);
+                snprintf (key, 256, "run-time-%d", i);
+                ret = dict_set_double (ctx_dict, key, elapsed_time);
+                if (ret) {
+                        gf_log (THIS->name, GF_LOG_DEBUG,
+                                "failed to set run-time");
                 }
         }
 

@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 /* libglusterfs/src/defaults.c:
@@ -1265,8 +1256,8 @@ default_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 int32_t
 default_forget (xlator_t *this, inode_t *inode)
 {
-        gf_log (this->name, GF_LOG_WARNING, "xlator does not implement "
-                "forget_cbk");
+        gf_log_callingfn (this->name, GF_LOG_WARNING, "xlator does not "
+                          "implement forget_cbk");
         return 0;
 }
 
@@ -1274,16 +1265,16 @@ default_forget (xlator_t *this, inode_t *inode)
 int32_t
 default_releasedir (xlator_t *this, fd_t *fd)
 {
-        gf_log (this->name, GF_LOG_WARNING, "xlator does not implement "
-                "releasedir_cbk");
+        gf_log_callingfn (this->name, GF_LOG_WARNING, "xlator does not "
+                          "implement releasedir_cbk");
         return 0;
 }
 
 int32_t
 default_release (xlator_t *this, fd_t *fd)
 {
-        gf_log (this->name, GF_LOG_WARNING, "xlator does not implement "
-                "release_cbk");
+        gf_log_callingfn (this->name, GF_LOG_WARNING, "xlator does not "
+                          "implement release_cbk");
         return 0;
 }
 

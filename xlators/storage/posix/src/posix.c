@@ -1890,9 +1890,6 @@ out:
         return 0;
 }
 
-#define ALIGN_BUF(ptr,bound) ((void *)((unsigned long)(ptr + bound - 1) & \
-                                       (unsigned long)(~(bound - 1))))
-
 int
 posix_readv (call_frame_t *frame, xlator_t *this,
              fd_t *fd, size_t size, off_t offset, uint32_t flags, dict_t *xdata)
@@ -2055,7 +2052,7 @@ __posix_writev (int fd, struct iovec *vector, int count, off_t startoff,
         internal_off = startoff;
         for (idx = 0; idx < count; idx++) {
                 /* page aligned buffer */
-                buf = ALIGN_BUF (alloc_buf, align);
+                buf = GF_ALIGN_BUF (alloc_buf, align);
 
                 memcpy (buf, vector[idx].iov_base, vector[idx].iov_len);
 
@@ -2569,6 +2566,19 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                 size = sys_lgetxattr (real_path, key, NULL, 0);
                 if (size <= 0) {
                         op_errno = errno;
+                        if ((op_errno == ENOTSUP) || (op_errno == ENOSYS)) {
+                                GF_LOG_OCCASIONALLY (gf_posix_xattr_enotsup_log,
+                                                     this->name, GF_LOG_WARNING,
+                                                     "Extended attributes not "
+                                                     "supported (try remounting"
+                                                     " brick with 'user_xattr' "
+                                                     "flag)");
+                        } else {
+                                gf_log (this->name, GF_LOG_ERROR,
+                                        "getxattr failed on %s: %s (%s)",
+                                        real_path, key, strerror (op_errno));
+                        }
+
                         goto done;
                 }
                 value = GF_CALLOC (size + 1, sizeof(char), gf_posix_mt_char);
@@ -2597,7 +2607,9 @@ posix_getxattr (call_frame_t *frame, xlator_t *this,
                         GF_LOG_OCCASIONALLY (gf_posix_xattr_enotsup_log,
                                              this->name, GF_LOG_WARNING,
                                              "Extended attributes not "
-                                             "supported.");
+                                             "supported (try remounting"
+                                             " brick with 'user_xattr' "
+                                             "flag)");
                 }
                 else {
                         gf_log (this->name, GF_LOG_ERROR,
@@ -2756,7 +2768,8 @@ posix_fgetxattr (call_frame_t *frame, xlator_t *this,
                         GF_LOG_OCCASIONALLY (gf_posix_xattr_enotsup_log,
                                              this->name, GF_LOG_WARNING,
                                              "Extended attributes not "
-                                             "supported.");
+                                             "supported (try remounting "
+                                             "brick with 'user_xattr' flag)");
                 }
                 else {
                         gf_log (this->name, GF_LOG_ERROR,
@@ -3565,6 +3578,7 @@ posix_fill_readdir (fd_t *fd, DIR *dir, off_t off, size_t size,
                 }
                 this_entry->d_off = telldir (dir);
                 this_entry->d_ino = entry->d_ino;
+                this_entry->d_type = entry->d_type;
 
                 list_add_tail (&this_entry->list, &entries->list);
 

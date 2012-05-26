@@ -1410,12 +1410,8 @@ nfs3_lookup (rpcsvc_request_t *req, struct nfs3_fh *fh, int fhlen, char *name)
         nfs3_handle_call_state_init (nfs3, cs, req, vol, stat, nfs3err);
 
         cs->lookuptype = GF_NFS3_REVALIDATE;
-        if (!nfs3_is_parentdir_entry (name))
-                ret = nfs3_fh_resolve_and_resume (cs, fh, name,
-                                                  nfs3_lookup_resume);
-        else
-                ret = nfs3_fh_resolve_and_resume (cs, fh, NULL,
-                                                  nfs3_lookup_parentdir_resume);
+        ret = nfs3_fh_resolve_and_resume (cs, fh, name,
+                                          nfs3_lookup_resume);
 
         if (ret < 0) {
                 gf_log (GF_NFS, GF_LOG_ERROR, "failed to start hard reslove");
@@ -2242,17 +2238,18 @@ out:
 
 
 int
-nfs3svc_write_vecsizer (int state, ssize_t *readsize, char *addr)
+nfs3svc_write_vecsizer (int state, ssize_t *readsize, char *base_addr,
+                        char *curr_addr)
 {
-        int         ret = 0;
-        uint32_t        fhlen = 0;
-        uint32_t        fhlen_n = 0;
+        int      ret     = 0;
+        uint32_t fhlen   = 0;
+        uint32_t fhlen_n = 0;
 
         if (state == 0) {
                 ret = NFS3_VECWRITE_READFHLEN;
                 *readsize = 4;
         } else if (state == NFS3_VECWRITE_READFHLEN) {
-                fhlen_n = *(uint32_t *)(addr - 4);
+                fhlen_n = *(uint32_t *)(curr_addr - 4);
                 fhlen = ntohl (fhlen_n);
                 *readsize = xdr_length_round_up (fhlen, NFS3_FHSIZE);
                 ret = NFS3_VECWRITE_READFH;

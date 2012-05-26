@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2006-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -66,6 +57,60 @@ struct dnscache6 {
         struct addrinfo *next;
 };
 
+
+/* works similar to mkdir(1) -p.
+ */
+int
+mkdir_p (char *path, mode_t mode, gf_boolean_t allow_symlinks)
+{
+        int             i               = 0;
+        int             ret             = -1;
+        char            dir[PATH_MAX]   = {0,};
+        struct stat     stbuf           = {0,};
+
+        strcpy (dir, path);
+        i = (dir[0] == '/')? 1: 0;
+        do {
+                if (path[i] != '/' && path[i] != '\0')
+                        continue;
+
+                dir[i] = '\0';
+                ret = mkdir (dir, mode);
+                if (ret && errno != EEXIST) {
+                        gf_log ("", GF_LOG_ERROR, "Failed due to reason %s",
+                                strerror (errno));
+                        goto out;
+                }
+
+                if (ret && errno == EEXIST && !allow_symlinks) {
+                        ret = lstat (dir, &stbuf);
+                        if (ret)
+                                goto out;
+
+                        if (S_ISLNK (stbuf.st_mode)) {
+                                ret = -1;
+                                gf_log ("", GF_LOG_ERROR, "%s is a symlink",
+                                        dir);
+                                goto out;
+                        }
+                }
+                dir[i] = '/';
+
+        } while (path[i++] != '\0');
+
+        ret = stat (dir, &stbuf);
+        if (ret || !S_ISDIR (stbuf.st_mode)) {
+                ret = -1;
+                gf_log ("", GF_LOG_ERROR, "Failed to create directory, "
+                        "possibly some of the components were not directories");
+                goto out;
+        }
+
+        ret = 0;
+out:
+
+        return ret;
+}
 
 int
 log_base2 (unsigned long x)
@@ -1908,11 +1953,6 @@ out:
  * power of two is returned.
  */
 
-/*
- * rounds up nr to next power of two. If nr is already a power of two, next
- * power of two is returned.
- */
-
 inline int32_t
 gf_roundup_next_power_of_two (uint32_t nr)
 {
@@ -2046,4 +2086,51 @@ gf_strip_whitespace (char *str, int len)
 
         GF_FREE (new_str);
         return new_len;
+}
+
+/* If the path exists use realpath(3) to handle extra slashes and to resolve
+ * symlinks else strip the extra slashes in the path and return */
+
+int
+gf_canonicalize_path (char *path)
+{
+        int             ret                  = -1;
+        int             path_len             = 0;
+        int             dir_path_len         = 0;
+        char           *tmppath              = NULL;
+        char           *dir                  = NULL;
+        char           *tmpstr               = NULL;
+
+        if (!path || *path != '/')
+                goto out;
+
+        tmppath = gf_strdup (path);
+        if (!tmppath)
+                goto out;
+
+        /* Strip the extra slashes and return */
+        bzero (path, strlen(path));
+        path[0] = '/';
+        dir = strtok_r(tmppath, "/", &tmpstr);
+
+        while (dir) {
+                dir_path_len = strlen(dir);
+                strncpy ((path + path_len + 1), dir, dir_path_len);
+                path_len += dir_path_len + 1;
+                dir = strtok_r (NULL, "/", &tmpstr);
+                if (dir)
+                        strncpy ((path + path_len), "/", 1);
+        }
+        path[path_len] = '\0';
+        ret = 0;
+
+ out:
+        if (ret)
+                gf_log ("common-utils", GF_LOG_ERROR,
+                        "Path manipulation failed");
+
+        if (tmppath)
+                GF_FREE(tmppath);
+
+        return ret;
 }

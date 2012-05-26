@@ -120,8 +120,10 @@ server_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 if (!__is_root_gfid (inode->gfid)) {
                         link_inode = inode_link (inode, state->loc.parent,
                                                  state->loc.name, stbuf);
-                        inode_lookup (link_inode);
-                        inode_unref (link_inode);
+                        if (link_inode) {
+                                inode_lookup (link_inode);
+                                inode_unref (link_inode);
+                        }
                 }
         } else {
                 if (state->is_revalidate && op_errno == ENOENT) {
@@ -521,9 +523,10 @@ server_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 inode_unref (link_inode);
         } else {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": MKDIR %s  ==> %"PRId32" (%s)",
+                        "%"PRId64": MKDIR %s (%s) ==> %"PRId32" (%s)",
                         frame->root->unique, state->loc.path,
-                        op_ret, strerror (op_errno));
+                        state->loc.inode ? uuid_utoa (state->loc.inode->gfid) :
+                        "--",op_ret, strerror (op_errno));
         }
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
@@ -567,9 +570,10 @@ server_mknod_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 inode_unref (link_inode);
         } else {
                 gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": MKNOD %s ==> %"PRId32" (%s)",
+                        "%"PRId64": MKNOD %s (%s) ==> %"PRId32" (%s)",
                         frame->root->unique, state->loc.path,
-                        op_ret, strerror (op_errno));
+                        state->loc.inode ? uuid_utoa (state->loc.inode->gfid) :
+                        "--",op_ret, strerror (op_errno));
         }
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
@@ -812,7 +816,8 @@ out:
         rsp.op_errno      = gf_errno_to_error (op_errno);
 
         if (op_ret == -1)
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
                         "%"PRId64": GETXATTR %s (%s) ==> %"PRId32" (%s)",
                         frame->root->unique, state->loc.path,
                         state->name, op_ret, strerror (op_errno));
@@ -858,7 +863,8 @@ out:
         rsp.op_errno      = gf_errno_to_error (op_errno);
 
         if (op_ret == -1)
-                gf_log (this->name, GF_LOG_INFO,
+                gf_log (this->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
                         "%"PRId64": FGETXATTR %"PRId64" (%s) ==> %"PRId32" (%s)",
                         frame->root->unique, state->resolve.fd_no,
                         state->name, op_ret, strerror (op_errno));
@@ -889,12 +895,17 @@ server_setxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         rsp.op_ret    = op_ret;
         rsp.op_errno  = gf_errno_to_error (op_errno);
 
-        if (op_ret == -1)
-                gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": SETXATTR %s (%s) ==> %"PRId32" (%s)",
+        if (op_ret == -1) {
+                gf_log (this->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
+                        "%"PRId64": SETXATTR %s (%s) ==> %s (%s)",
                         frame->root->unique, state->loc.path,
                         state->loc.inode ? uuid_utoa (state->loc.inode->gfid) :
-                        "--", op_ret, strerror (op_errno));
+                        "--", ((state->dict) ? ((state->dict->members_list) ?
+                                                state->dict->members_list->key :
+                                                "(null)") : ("null")),
+                        strerror (op_errno));
+        }
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -926,11 +937,15 @@ server_fsetxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         state = CALL_STATE(frame);
 
         if (op_ret == -1)
-                gf_log (this->name, GF_LOG_INFO,
-                        "%"PRId64": FSETXATTR %"PRId64" (%s) ==> %"PRId32" (%s)",
+                gf_log (this->name, ((op_errno == ENOTSUP) ?
+                                     GF_LOG_DEBUG : GF_LOG_INFO),
+                        "%"PRId64": FSETXATTR %"PRId64" (%s) ==> %s (%s)",
                         frame->root->unique, state->resolve.fd_no,
                         state->fd ? uuid_utoa (state->fd->inode->gfid) : "--",
-                        op_ret, strerror (op_errno));
+                        ((state->dict) ? ((state->dict->members_list) ?
+                                          state->dict->members_list->key :
+                                          "(null)") : "null"),
+                        strerror (op_errno));
 
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
@@ -1440,6 +1455,16 @@ server_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         op_ret, strerror (op_errno));
         }
 
+#ifdef GF_TESTING_IO_XDATA
+        {
+                int ret = 0;
+                if (!xdata)
+                        xdata = dict_new ();
+
+                ret = dict_set_str (xdata, "testing-the-xdata-key",
+                                       "testing-xdata-value");
+        }
+#endif
         GF_PROTOCOL_DICT_SERIALIZE (this, xdata, (&rsp.xdata.xdata_val),
                                     rsp.xdata.xdata_len, op_errno, out);
 
@@ -3377,6 +3402,10 @@ server_writev (rpcsvc_request_t *req)
                                       (args.xdata.xdata_len), ret,
                                       op_errno, out);
 
+#ifdef GF_TESTING_IO_XDATA
+        dict_dump (state->xdata);
+#endif
+
         ret = 0;
         resolve_and_resume (frame, server_writev_resume);
 out:
@@ -3398,26 +3427,59 @@ server_writev_vec (rpcsvc_request_t *req, struct iovec *payload,
 }
 
 #define SERVER3_1_VECWRITE_START 0
-#define SERVER3_1_VECWRITE_READINGHDR 1
+#define SERVER3_1_VECWRITE_READING_HDR 1
+#define SERVER3_1_VECWRITE_READING_OPAQUE 2
 
 int
-server_writev_vecsizer (int state, ssize_t *readsize, char *addr)
+server_writev_vecsizer (int state, ssize_t *readsize, char *base_addr,
+                        char *curr_addr)
 {
-        int nextstate = 0;
-        gfs3_write_req    write_req              = {{0,},};
+        ssize_t         size = 0;
+        int             nextstate = 0;
+        gfs3_write_req  write_req = {{0,},};
+        XDR             xdr;
 
         switch (state) {
         case SERVER3_1_VECWRITE_START:
-                *readsize = xdr_sizeof ((xdrproc_t) xdr_gfs3_write_req, &write_req);
-                nextstate = SERVER3_1_VECWRITE_READINGHDR;
+                size = xdr_sizeof ((xdrproc_t) xdr_gfs3_write_req,
+                                   &write_req);
+                *readsize = size;
+                nextstate = SERVER3_1_VECWRITE_READING_HDR;
                 break;
-        case SERVER3_1_VECWRITE_READINGHDR:
+        case SERVER3_1_VECWRITE_READING_HDR:
+                size = xdr_sizeof ((xdrproc_t) xdr_gfs3_write_req,
+                                           &write_req);
+
+                xdrmem_create (&xdr, base_addr, size, XDR_DECODE);
+
+                /* This will fail if there is xdata sent from client, if not,
+                   well and good */
+                xdr_gfs3_write_req (&xdr, &write_req);
+
+                /* need to round off to proper roof (%4), as XDR packing pads
+                   the end of opaque object with '0' */
+                size = roof (write_req.xdata.xdata_len, 4);
+
+                *readsize = size;
+
+                if (!size)
+                        nextstate = SERVER3_1_VECWRITE_START;
+                else
+                        nextstate = SERVER3_1_VECWRITE_READING_OPAQUE;
+
+                if (write_req.xdata.xdata_val)
+                        free (write_req.xdata.xdata_val);
+
+                break;
+
+        case SERVER3_1_VECWRITE_READING_OPAQUE:
                 *readsize = 0;
                 nextstate = SERVER3_1_VECWRITE_START;
                 break;
         default:
-                gf_log ("server3_1", GF_LOG_ERROR, "wrong state: %d", state);
+                gf_log ("server", GF_LOG_ERROR, "wrong state: %d", state);
         }
+
         return nextstate;
 }
 
@@ -4860,6 +4922,9 @@ out:
         if (args.xdata.xdata_val)
                 free (args.xdata.xdata_val);
 
+        if (args.flock.lk_owner.lk_owner_val)
+                free (args.flock.lk_owner.lk_owner_val);
+
         if (op_errno)
                 req->rpc_err = GARBAGE_ARGS;
 
@@ -4944,6 +5009,9 @@ server_finodelk (rpcsvc_request_t *req)
 out:
         if (args.xdata.xdata_val)
                 free (args.xdata.xdata_val);
+
+        if (args.flock.lk_owner.lk_owner_val)
+                free (args.flock.lk_owner.lk_owner_val);
 
         if (op_errno)
                 req->rpc_err = GARBAGE_ARGS;
@@ -5413,6 +5481,9 @@ server_lk (rpcsvc_request_t *req)
 out:
         if (args.xdata.xdata_val)
                 free (args.xdata.xdata_val);
+
+        if (args.flock.lk_owner.lk_owner_val)
+                free (args.flock.lk_owner.lk_owner_val);
 
         if (op_errno)
                 req->rpc_err = GARBAGE_ARGS;

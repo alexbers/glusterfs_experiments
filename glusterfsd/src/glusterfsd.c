@@ -206,6 +206,8 @@ create_fuse_mount (glusterfs_ctx_t *ctx)
         int              ret = 0;
         cmd_args_t      *cmd_args = NULL;
         xlator_t        *master = NULL;
+        char            *mount_point = NULL;
+        char            cwd[PATH_MAX] = {0,};
 
         cmd_args = &ctx->cmd_args;
 
@@ -242,8 +244,28 @@ create_fuse_mount (glusterfs_ctx_t *ctx)
         if (!master->options)
                 goto err;
 
-        ret = dict_set_static_ptr (master->options, ZR_MOUNTPOINT_OPT,
-                                   cmd_args->mount_point);
+        /* Check if mount-point is absolute path,
+         * if not convert to absolute path by concating with CWD
+         */
+        if (cmd_args->mount_point[0] != '/') {
+                if (getcwd (cwd, PATH_MAX) != NULL) {
+                        ret = gf_asprintf (&mount_point, "%s/%s", cwd,
+                                           cmd_args->mount_point);
+                        if (ret == -1) {
+                                gf_log ("glusterfsd", GF_LOG_ERROR,
+                                        "Could not create absolute mountpoint "
+                                        "path");
+                                goto err;
+                        }
+                } else {
+                        gf_log ("glusterfsd", GF_LOG_ERROR,
+                                "Could not get current working directory");
+                        goto err;
+                }
+        } else
+                mount_point = gf_strdup (cmd_args->mount_point);
+
+        ret = dict_set_dynstr (master->options, ZR_MOUNTPOINT_OPT, mount_point);
         if (ret < 0) {
                 gf_log ("glusterfsd", GF_LOG_ERROR,
                         "failed to set mount-point to options dictionary");
@@ -364,7 +386,7 @@ create_fuse_mount (glusterfs_ctx_t *ctx)
         }
 
         if (!cmd_args->no_daemon_mode) {
-                 ret = dict_set_static_ptr (master->options, "sync-mtab",
+                 ret = dict_set_static_ptr (master->options, "sync-to-mount",
                                             "enable");
                 if (ret < 0) {
                         gf_log ("glusterfsd", GF_LOG_ERROR,
@@ -1480,11 +1502,11 @@ daemonize (glusterfs_ctx_t *ctx)
         case 0:
                 break;
         default:
-                if (ctx->mtab_pid > 0) {
-                        ret = waitpid (ctx->mtab_pid, &cstatus, 0);
-                        if (!(ret == ctx->mtab_pid && cstatus == 0)) {
+                if (ctx->mnt_pid > 0) {
+                        ret = waitpid (ctx->mnt_pid, &cstatus, 0);
+                        if (!(ret == ctx->mnt_pid && cstatus == 0)) {
                                 gf_log ("daemonize", GF_LOG_ERROR,
-                                        "/etc/mtab update failed");
+                                        "mount failed");
                                 exit (1);
                         }
                 }

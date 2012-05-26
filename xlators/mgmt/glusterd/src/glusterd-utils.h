@@ -319,7 +319,7 @@ glusterd_rb_check_bricks (glusterd_volinfo_t *volinfo,
                           glusterd_brickinfo_t *dst_brick);
 
 int
-glusterd_brick_create_path (char *host, char *path, uuid_t uuid, mode_t mode,
+glusterd_brick_create_path (char *host, char *path, uuid_t uuid,
                             char **op_errstr);
 int
 glusterd_sm_tr_log_transition_add (glusterd_sm_tr_log_t *log,
@@ -438,4 +438,10 @@ glusterd_validate_volume_id (dict_t *op_dict, glusterd_volinfo_t *volinfo);
 int
 glusterd_defrag_volume_status_update (glusterd_volinfo_t *volinfo,
                                       dict_t *rsp_dict);
+
+int
+glusterd_check_files_identical (char *filename1, char *filename2,
+                                gf_boolean_t *identical);
+void
+glusterd_volinfo_reset_defrag_stats (glusterd_volinfo_t *volinfo);
 #endif

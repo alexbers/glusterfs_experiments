@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2008-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -215,6 +206,8 @@ struct gf_defrag_info_ {
         pid_t                        pid;
         inode_t                     *root_inode;
         uuid_t                       node_uuid;
+        struct timeval               start_time;
+        gf_boolean_t                 stats;
 
 };
 
@@ -248,8 +241,6 @@ struct dht_conf {
         /* This is the count used as the distribute layout for a directory */
         /* Will be a global flag to control the layout spread count */
         uint32_t       dir_spread_cnt;
-
-	struct syncenv *env; /* The env pointer to the rebalance synctask */
 
         /* to keep track of nodes which are decomissioned */
         xlator_t     **decommissioned_bricks;

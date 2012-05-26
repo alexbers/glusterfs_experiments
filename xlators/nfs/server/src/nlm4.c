@@ -199,12 +199,40 @@ nlm4_prep_nlm4_unlockargs (nlm4_unlockargs *args, struct nfs3_fh *fh,
 }
 
 void
+nlm4_prep_shareargs (nlm4_shareargs *args, struct nfs3_fh *fh,
+                     nlm4_lkowner_t *oh, char *cookiebytes)
+{
+        memset (args, 0, sizeof (*args));
+        args->share.fh.n_bytes = (void *)fh;
+        args->share.oh.n_bytes = (void *)oh;
+        args->cookie.n_bytes = (void *)cookiebytes;
+}
+
+void
+nlm4_prep_freeallargs (nlm4_freeallargs *args, nlm4_lkowner_t *oh)
+{
+        memset (args, 0, sizeof (*args));
+        args->name = (void *)oh;
+}
+
+void
 nlm_copy_lkowner (gf_lkowner_t *dst, netobj *src)
 {
         dst->len = src->n_len;
         memcpy (dst->data, src->n_bytes, dst->len);
 }
 
+int
+nlm_is_oh_same_lkowner (gf_lkowner_t *a, netobj *b)
+{
+        if (!a || !b) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "invalid args");
+                return -1;
+        }
+
+        return (a->len == b->n_len &&
+                !memcmp (a->data, b->n_bytes, a->len));
+}
 
 nfsstat3
 nlm4_errno_to_nlm4stat (int errnum)
@@ -251,6 +279,7 @@ nlm4_call_state_init (struct nfs3_state *s, rpcsvc_request_t *req)
         cs->req = req;
         cs->nfsx = s->nfsx;
         cs->nfs3state = s;
+        cs->monitor = 1;
 
         return cs;
 }
@@ -270,9 +299,11 @@ nlm_monitor (char *caller_name)
                 }
         }
         UNLOCK (&nlm_client_list_lk);
-        if (monitor == -1) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "%s was not found in the nlmclnt list", caller_name);
-        }
+
+        if (monitor == -1)
+                gf_log (GF_NLM, GF_LOG_ERROR, "%s was not found in "
+                        "the nlmclnt list", caller_name);
+
         return monitor;
 }
 
@@ -401,6 +432,7 @@ nlm_add_nlmclnt (char *caller_name)
 
                 INIT_LIST_HEAD(&nlmclnt->fdes);
                 INIT_LIST_HEAD(&nlmclnt->nlm_clients);
+                INIT_LIST_HEAD(&nlmclnt->shares);
 
                 list_add (&nlmclnt->nlm_clients, &nlm_client_list);
                 nlmclnt->caller_name = gf_strdup (caller_name);
@@ -541,23 +573,31 @@ out:
 }
 
 nlm_client_t *
+__nlm_get_uniq (char *caller_name)
+{
+        nlm_client_t *nlmclnt = NULL;
+
+        if (!caller_name)
+                return NULL;
+
+        list_for_each_entry (nlmclnt, &nlm_client_list, nlm_clients) {
+                if (!strcmp(caller_name, nlmclnt->caller_name))
+                        return nlmclnt;
+        }
+
+        return NULL;
+}
+
+nlm_client_t *
 nlm_get_uniq (char *caller_name)
 {
         nlm_client_t *nlmclnt = NULL;
-        int nlmclnt_found = 0;
 
         LOCK (&nlm_client_list_lk);
-        list_for_each_entry (nlmclnt, &nlm_client_list, nlm_clients) {
-                if (!strcmp(caller_name, nlmclnt->caller_name)) {
-                        nlmclnt_found = 1;
-                        break;
-                }
-        }
+        nlmclnt = __nlm_get_uniq (caller_name);
         UNLOCK (&nlm_client_list_lk);
-        if (nlmclnt_found)
-                return nlmclnt;
-        else
-                return NULL;
+
+        return nlmclnt;
 }
 
 
@@ -572,9 +612,7 @@ nlm4_file_open_and_resume(nfs3_call_state_t *cs, nlm4_resume_fn_t resume)
         nlmclnt = nlm_get_uniq (cs->args.nlm4_lockargs.alock.caller_name);
         if (nlmclnt == NULL) {
                 gf_log (GF_NLM, GF_LOG_ERROR, "nlm_get_uniq() returned NULL");
-                cs->resolve_ret = -1;
-                cs->resume_fn(cs);
-                ret = -1;
+                ret = -ENOLCK;
                 goto err;
         }
         cs->resume_fn = resume;
@@ -590,15 +628,19 @@ nlm4_file_open_and_resume(nfs3_call_state_t *cs, nlm4_resume_fn_t resume)
         fd = fd_create_uint64 (cs->resolvedloc.inode, (uint64_t)nlmclnt);
         if (fd == NULL) {
                 gf_log (GF_NLM, GF_LOG_ERROR, "fd_create_uint64() returned NULL");
-                cs->resolve_ret = -1;
-                cs->resume_fn(cs);
-                ret = -1;
+                ret = -ENOLCK;
                 goto err;
         }
 
         cs->fd = fd;
 
         frame = create_frame (cs->nfsx, cs->nfsx->ctx->pool);
+        if (!frame) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "unable to create frame");
+                ret = -ENOMEM;
+                goto err;
+        }
+
         frame->root->pid = NFS_PID;
         frame->root->uid = 0;
         frame->root->gid = 0;
@@ -728,7 +770,6 @@ err:
 int
 nlm4_test_fd_resume (void *carg)
 {
-        nlm4_stats                      stat = nlm4_denied;
         int                             ret = -EFAULT;
         nfs_user_t                      nfu = {0, };
         nfs3_call_state_t               *cs = NULL;
@@ -738,21 +779,12 @@ nlm4_test_fd_resume (void *carg)
                 return ret;
 
         cs = (nfs3_call_state_t *)carg;
-        nlm4_check_fh_resolve_status (cs, stat, nlm4err);
         nfs_request_user_init (&nfu, cs->req);
         nlm4_lock_to_gf_flock (&flock, &cs->args.nlm4_testargs.alock,
                                cs->args.nlm4_testargs.exclusive);
         nlm_copy_lkowner (&nfu.lk_owner, &cs->args.nlm4_testargs.alock.oh);
         ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_GETLK, &flock,
                       nlm4svc_test_cbk, cs);
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
-nlm4err:
-        if (ret < 0) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "Unable to call lk()");
-                nlm4_test_reply (cs, stat, &flock);
-                nfs3_call_state_wipe (cs);
-        }
 
         return ret;
 }
@@ -772,14 +804,15 @@ nlm4_test_resume (void *carg)
         cs = (nfs3_call_state_t *)carg;
         nlm4_check_fh_resolve_status (cs, stat, nlm4err);
         fd = fd_anonymous (cs->resolvedloc.inode);
+        if (!fd)
+                goto nlm4err;
         cs->fd = fd;
         ret = nlm4_test_fd_resume (cs);
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
 
 nlm4err:
         if (ret < 0) {
                 gf_log (GF_NLM, GF_LOG_ERROR, "unable to open_and_resume");
+                stat = nlm4_errno_to_nlm4stat (-ret);
                 nlm4_test_reply (cs, stat, NULL);
                 nfs3_call_state_wipe (cs);
         }
@@ -840,9 +873,9 @@ nlm4err:
         }
 
 rpcerr:
-        if (ret < 0) {
+        if (ret < 0)
                 nfs3_call_state_wipe (cs);
-        }
+
         return ret;
 }
 
@@ -1247,11 +1280,11 @@ nlm4svc_lock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   int32_t op_ret, int32_t op_errno, struct gf_flock *flock,
                   dict_t *xdata)
 {
-        nlm4_stats                      stat = nlm4_denied;
-        nfs3_call_state_t              *cs = NULL;
-        int                             transit_cnt = -1;
+        nlm4_stats                       stat        = nlm4_denied;
+        int                              transit_cnt = -1;
         char                            *caller_name = NULL;
-        pthread_t thr;
+        nfs3_call_state_t               *cs          = NULL;
+        pthread_t                        thr;
 
         cs = frame->local;
         caller_name = cs->args.nlm4_lockargs.alock.caller_name;
@@ -1265,7 +1298,7 @@ nlm4svc_lock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 goto err;
         } else {
                 stat = nlm4_granted;
-                if (!nlm_monitor (caller_name)) {
+                if (cs->monitor && !nlm_monitor (caller_name)) {
                         /* FIXME: handle nsm_monitor failure */
                         pthread_create (&thr, NULL, nsm_monitor, (void*)caller_name);
                 }
@@ -1297,7 +1330,6 @@ nlm4_lock_fd_resume (void *carg)
 
         cs = (nfs3_call_state_t *)carg;
         nlm4_check_fh_resolve_status (cs, stat, nlm4err);
-
         (void) nlm_search_and_add (cs->fd,
                                    cs->args.nlm4_lockargs.alock.caller_name);
         nfs_request_user_init (&nfu, cs->req);
@@ -1309,14 +1341,17 @@ nlm4_lock_fd_resume (void *carg)
                                     nlm4_blocked);
                 ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_SETLKW,
                               &flock, nlm4svc_lock_cbk, cs);
+                /* FIXME: handle error from nfs_lk() specially  by just
+                 * cleaning up cs and unblock the client lock request.
+                 */
+                ret = 0;
         } else
                 ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_SETLK,
                               &flock, nlm4svc_lock_cbk, cs);
 
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
 nlm4err:
         if (ret < 0) {
+                stat = nlm4_errno_to_nlm4stat (-ret);
                 gf_log (GF_NLM, GF_LOG_ERROR, "unable to call lk()");
                 nlm4_generic_reply (cs->req, cs->args.nlm4_lockargs.cookie,
                                     stat);
@@ -1331,8 +1366,8 @@ int
 nlm4_lock_resume (void *carg)
 {
         nlm4_stats                      stat = nlm4_failed;
-        int                             ret = -1;
-        nfs3_call_state_t               *cs = NULL;
+        int                             ret  = -1;
+        nfs3_call_state_t              *cs   = NULL;
 
         if (!carg)
                 return ret;
@@ -1340,12 +1375,11 @@ nlm4_lock_resume (void *carg)
         cs = (nfs3_call_state_t *)carg;
         nlm4_check_fh_resolve_status (cs, stat, nlm4err);
         ret = nlm4_file_open_and_resume (cs, nlm4_lock_fd_resume);
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
 
 nlm4err:
         if (ret < 0) {
                 gf_log (GF_NLM, GF_LOG_ERROR, "unable to open and resume");
+                stat = nlm4_errno_to_nlm4stat (-ret);
                 nlm4_generic_reply (cs->req, cs->args.nlm4_lockargs.cookie,
                                     stat);
                 nfs3_call_state_wipe (cs);
@@ -1354,17 +1388,16 @@ nlm4err:
         return ret;
 }
 
-
 int
-nlm4svc_lock (rpcsvc_request_t *req)
+nlm4svc_lock_common (rpcsvc_request_t *req, int mon)
 {
-        xlator_t                        *vol = NULL;
-        nlm4_stats                      stat = nlm4_failed;
-        struct nfs_state               *nfs = NULL;
-        nfs3_state_t                   *nfs3 = NULL;
-        nfs3_call_state_t               *cs = NULL;
-        int                             ret = RPCSVC_ACTOR_ERROR;
-        struct nfs3_fh                  fh = {{0}, };
+        int                              ret      = RPCSVC_ACTOR_ERROR;
+        nlm4_stats                       stat     = nlm4_failed;
+        struct nfs3_fh                   fh       = {{0}, };
+        xlator_t                        *vol      = NULL;
+        nfs3_state_t                    *nfs3     = NULL;
+        nfs3_call_state_t               *cs       = NULL;
+        struct nfs_state                *nfs      = NULL;
 
         if (!req)
                 return ret;
@@ -1381,7 +1414,9 @@ nlm4svc_lock (rpcsvc_request_t *req)
                 rpcsvc_request_seterr (req, GARBAGE_ARGS);
                 goto rpcerr;
         }
+
         fh = cs->lockfh;
+        cs->monitor = mon;
         nlm4_validate_gluster_fh (&fh, stat, nlm4err);
         nlm4_map_fh_to_volume (cs->nfs3state, fh, req, vol, stat, nlm4err);
 
@@ -1415,7 +1450,20 @@ rpcerr:
         if (ret < 0) {
                 nfs3_call_state_wipe (cs);
         }
+
         return ret;
+}
+
+int
+nlm4svc_lock (rpcsvc_request_t *req)
+{
+        return nlm4svc_lock_common (req, 1);
+}
+
+int
+nlm4svc_nm_lock (rpcsvc_request_t *req)
+{
+        return nlm4svc_lock_common (req, 0);
 }
 
 int
@@ -1443,7 +1491,6 @@ err:
 int
 nlm4_cancel_fd_resume (void *carg)
 {
-        nlm4_stats                      stat = nlm4_denied;
         int                             ret = -EFAULT;
         nfs_user_t                      nfu = {0, };
         nfs3_call_state_t               *cs = NULL;
@@ -1453,7 +1500,6 @@ nlm4_cancel_fd_resume (void *carg)
                 return ret;
 
         cs = (nfs3_call_state_t *)carg;
-        nlm4_check_fh_resolve_status (cs, stat, nlm4err);
         nfs_request_user_init (&nfu, cs->req);
         nlm4_lock_to_gf_flock (&flock, &cs->args.nlm4_cancargs.alock,
                                 cs->args.nlm4_cancargs.exclusive);
@@ -1462,74 +1508,6 @@ nlm4_cancel_fd_resume (void *carg)
         ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_SETLK,
                       &flock, nlm4svc_cancel_cbk, cs);
 
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
-nlm4err:
-        if (ret < 0) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "unable to call lk()");
-                nlm4_generic_reply (cs->req, cs->args.nlm4_cancargs.cookie,
-                                    stat);
-                nfs3_call_state_wipe (cs);
-        }
-
-        return ret;
-}
-
-int
-nlm4svc_unlock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
-                    int32_t op_ret, int32_t op_errno, struct gf_flock *flock,
-                    dict_t *xdata)
-{
-        nlm4_stats                      stat = nlm4_denied;
-        nfs3_call_state_t              *cs = NULL;
-
-        cs = frame->local;
-        if (op_ret == -1) {
-                stat = nlm4_errno_to_nlm4stat (op_errno);
-                goto err;
-        } else {
-                stat = nlm4_granted;
-                if (flock->l_type == F_UNLCK)
-                        nlm_search_and_delete (cs->fd,
-                                               cs->args.nlm4_unlockargs.alock.caller_name);
-        }
-
-err:
-        nlm4_generic_reply (cs->req, cs->args.nlm4_unlockargs.cookie, stat);
-        nfs3_call_state_wipe (cs);
-        return 0;
-}
-
-int
-nlm4_unlock_fd_resume (void *carg)
-{
-        nlm4_stats                      stat = nlm4_denied;
-        int                             ret = -EFAULT;
-        nfs_user_t                      nfu = {0, };
-        nfs3_call_state_t               *cs = NULL;
-        struct gf_flock                 flock = {0, };
-
-        if (!carg)
-                return ret;
-        cs = (nfs3_call_state_t *)carg;
-        nlm4_check_fh_resolve_status (cs, stat, nlm4err);
-        nfs_request_user_init (&nfu, cs->req);
-        nlm4_lock_to_gf_flock (&flock, &cs->args.nlm4_unlockargs.alock, 0);
-        nlm_copy_lkowner (&nfu.lk_owner, &cs->args.nlm4_unlockargs.alock.oh);
-        flock.l_type = F_UNLCK;
-        ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_SETLK,
-                      &flock, nlm4svc_unlock_cbk, cs);
-
-        if (ret < 0)
-                stat = nlm4_errno_to_nlm4stat (-ret);
-nlm4err:
-        if (ret < 0) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "unable to call lk()");
-                nlm4_generic_reply (cs->req, cs->args.nlm4_unlockargs.cookie,
-                                    stat);
-                nfs3_call_state_wipe (cs);
-        }
-
         return ret;
 }
 
@@ -1537,7 +1515,7 @@ int
 nlm4_cancel_resume (void *carg)
 {
         nlm4_stats                      stat = nlm4_failed;
-        int                             ret = -1;
+        int                             ret = -EFAULT;
         nfs3_call_state_t               *cs = NULL;
         nlm_client_t                    *nlmclnt = NULL;
 
@@ -1554,20 +1532,22 @@ nlm4_cancel_resume (void *carg)
         }
         cs->fd = fd_lookup_uint64 (cs->resolvedloc.inode, (uint64_t)nlmclnt);
         if (cs->fd == NULL) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "nlm_get_uniq() returned NULL");
+                gf_log (GF_NLM, GF_LOG_ERROR, "fd_lookup_uint64 retrned NULL");
                 goto nlm4err;
         }
         ret = nlm4_cancel_fd_resume (cs);
 
 nlm4err:
         if (ret < 0) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "unable to unlock_fd_resume()");
+                gf_log (GF_NLM, GF_LOG_WARNING, "unable to unlock_fd_resume()");
+                stat = nlm4_errno_to_nlm4stat (-ret);
                 nlm4_generic_reply (cs->req, cs->args.nlm4_cancargs.cookie,
                                     stat);
+
                 nfs3_call_state_wipe (cs);
         }
-
-        return ret;
+        /* clean up is taken care of */
+        return 0;
 }
 
 int
@@ -1631,6 +1611,52 @@ rpcerr:
 }
 
 int
+nlm4svc_unlock_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
+                    int32_t op_ret, int32_t op_errno, struct gf_flock *flock,
+                    dict_t *xdata)
+{
+        nlm4_stats                      stat = nlm4_denied;
+        nfs3_call_state_t              *cs = NULL;
+
+        cs = frame->local;
+        if (op_ret == -1) {
+                stat = nlm4_errno_to_nlm4stat (op_errno);
+                goto err;
+        } else {
+                stat = nlm4_granted;
+                if (flock->l_type == F_UNLCK)
+                        nlm_search_and_delete (cs->fd,
+                                               cs->args.nlm4_unlockargs.alock.caller_name);
+        }
+
+err:
+        nlm4_generic_reply (cs->req, cs->args.nlm4_unlockargs.cookie, stat);
+        nfs3_call_state_wipe (cs);
+        return 0;
+}
+
+int
+nlm4_unlock_fd_resume (void *carg)
+{
+        int                             ret = -EFAULT;
+        nfs_user_t                      nfu = {0, };
+        nfs3_call_state_t               *cs = NULL;
+        struct gf_flock                 flock = {0, };
+
+        if (!carg)
+                return ret;
+        cs = (nfs3_call_state_t *)carg;
+        nfs_request_user_init (&nfu, cs->req);
+        nlm4_lock_to_gf_flock (&flock, &cs->args.nlm4_unlockargs.alock, 0);
+        nlm_copy_lkowner (&nfu.lk_owner, &cs->args.nlm4_unlockargs.alock.oh);
+        flock.l_type = F_UNLCK;
+        ret = nfs_lk (cs->nfsx, cs->vol, &nfu, cs->fd, F_SETLK,
+                      &flock, nlm4svc_unlock_cbk, cs);
+
+        return ret;
+}
+
+int
 nlm4_unlock_resume (void *carg)
 {
         nlm4_stats                      stat = nlm4_failed;
@@ -1646,26 +1672,30 @@ nlm4_unlock_resume (void *carg)
 
         nlmclnt = nlm_get_uniq (cs->args.nlm4_unlockargs.alock.caller_name);
         if (nlmclnt == NULL) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "nlm_get_uniq() returned NULL");
+                stat = nlm4_granted;
+                gf_log (GF_NLM, GF_LOG_WARNING, "nlm_get_uniq() returned NULL");
                 goto nlm4err;
         }
         cs->fd = fd_lookup_uint64 (cs->resolvedloc.inode, (uint64_t)nlmclnt);
         if (cs->fd == NULL) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "fd_lookup_uint64() returned NULL");
+                stat = nlm4_granted;
+                gf_log (GF_NLM, GF_LOG_WARNING, "fd_lookup_uint64() returned "
+                        "NULL");
                 goto nlm4err;
         }
         ret = nlm4_unlock_fd_resume (cs);
 
 nlm4err:
         if (ret < 0) {
-                gf_log (GF_NLM, GF_LOG_ERROR, "unable to unlock_fd_resume");
+                gf_log (GF_NLM, GF_LOG_WARNING, "unable to unlock_fd_resume");
+                stat = nlm4_errno_to_nlm4stat (-ret);
                 nlm4_generic_reply (cs->req, cs->args.nlm4_unlockargs.cookie,
                                     stat);
 
                 nfs3_call_state_wipe (cs);
         }
-
-        return ret;
+        /* we have already taken care of cleanup */
+        return 0;
 }
 
 int
@@ -1708,6 +1738,7 @@ nlm4svc_unlock (rpcsvc_request_t *req)
         }
 
         cs->vol = vol;
+        /* FIXME: check if trans is being used at all for unlock */
         cs->trans = rpcsvc_request_transport_ref(req);
         nlm4_volume_started_check (nfs3, vol, ret, rpcerr);
 
@@ -1727,6 +1758,500 @@ rpcerr:
                 nfs3_call_state_wipe (cs);
         }
         return ret;
+}
+
+int
+nlm4_share_reply (nfs3_call_state_t *cs, nlm4_stats stat)
+{
+        nlm4_shareres  res = {{0}, 0, 0};
+
+        if (!cs)
+                return -1;
+
+        res.cookie = cs->args.nlm4_shareargs.cookie;
+        res.stat = stat;
+        res.sequence = 0;
+
+        nlm4svc_submit_reply (cs->req, (void *)&res,
+                              (nlm4_serializer)xdr_serialize_nlm4_shareres);
+        return 0;
+}
+
+nlm_share_t *
+nlm4_share_new ()
+{
+        nlm_share_t      *share     = NULL;
+
+        share = GF_CALLOC (1, sizeof (nlm_share_t),
+                           gf_nfs_mt_nlm4_share);
+        if (!share)
+                goto out;
+
+        INIT_LIST_HEAD (&share->client_list);
+        INIT_LIST_HEAD (&share->inode_list);
+ out:
+        return share;
+}
+
+int
+nlm4_add_share_to_inode (nlm_share_t *share)
+{
+        int                    ret     = -1;
+        uint64_t               ctx     = 0;
+        struct list_head      *head    = NULL;
+        xlator_t              *this    = NULL;
+        inode_t               *inode   = NULL;
+
+        this = THIS;
+        inode = share->inode;
+        ret = inode_ctx_get (inode, this, &ctx);
+
+        head = (struct list_head *)ctx;
+
+        if (ret || !head) {
+                head = GF_CALLOC (1, sizeof (struct list_head),
+                                  gf_common_mt_list_head);
+                if (!head ) {
+                        ret = -1;
+                        goto out;
+                }
+
+                INIT_LIST_HEAD (head);
+                ret = inode_ctx_put (inode, this, (uint64_t)head);
+                if (ret)
+                        goto out;
+        }
+
+        list_add (&share->inode_list, head);
+
+ out:
+        if (ret && head)
+                GF_FREE (head);
+
+        return ret;
+}
+
+int
+nlm4_approve_share_reservation (nfs3_call_state_t *cs)
+{
+        int                       ret               = -1;
+        uint64_t                  ctx               = 0;
+        fsh_mode                  req_mode          = 0;
+        fsh_access                req_access        = 0;
+        inode_t                  *inode             = NULL;
+        nlm_share_t              *share             = NULL;
+        struct list_head         *head              = NULL;
+
+        if (!cs)
+                goto out;
+
+        inode = cs->resolvedloc.inode;
+
+        ret = inode_ctx_get (inode, THIS, &ctx);
+        if (ret) {
+                ret = 0;
+                goto out;
+        }
+
+        head = (struct list_head *)ctx;
+        if (!head || list_empty (head))
+                goto out;
+
+        req_mode = cs->args.nlm4_shareargs.share.mode;
+        req_access = cs->args.nlm4_shareargs.share.access;
+
+        list_for_each_entry (share, head, inode_list) {
+                ret = (((req_mode & share->access) == 0) &&
+                       ((req_access & share->mode) == 0));
+                if (!ret) {
+                        ret = -1;
+                        goto out;
+                }
+        }
+        ret = 0;
+
+ out:
+         return ret;
+}
+
+int
+nlm4_create_share_reservation (nfs3_call_state_t *cs)
+{
+        int                       ret        = -1;
+        nlm_share_t              *share      = NULL;
+        nlm_client_t             *client     = NULL;
+        inode_t                  *inode      = NULL;
+
+        LOCK (&nlm_client_list_lk);
+
+        inode = inode_ref (cs->resolvedloc.inode);
+        if (!inode) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "inode not found");
+                goto out;
+        }
+
+        client = __nlm_get_uniq (cs->args.nlm4_shareargs.share.caller_name);
+        if (!client) {
+                /* DO NOT add client. the client is supposed
+                   to be here, since nlm4svc_share adds it */
+                gf_log (GF_NLM, GF_LOG_ERROR, "client not found");
+                goto out;
+        }
+
+        ret = nlm4_approve_share_reservation (cs);
+        if (ret)
+                goto out;
+
+        share = nlm4_share_new ();
+        if (!share) {
+                ret = -1;
+                goto out;
+        }
+
+        share->inode  = inode;
+        share->mode   = cs->args.nlm4_shareargs.share.mode;
+        share->access = cs->args.nlm4_shareargs.share.access;
+        nlm_copy_lkowner (&share->lkowner,
+                          &cs->args.nlm4_shareargs.share.oh);
+
+        ret = nlm4_add_share_to_inode (share);
+        if (ret)
+                goto out;
+
+        list_add (&share->client_list, &client->shares);
+
+ out:
+        if (ret && inode) {
+                inode_unref (inode);
+                if (share)
+                        GF_FREE (share);
+        }
+
+        UNLOCK (&nlm_client_list_lk);
+        return ret;
+}
+
+/*
+  SHARE and UNSHARE calls DO NOT perform STACK_WIND,
+  the (non-monitored) share reservations are maintained
+  at *nfs xlator level only*, in memory
+*/
+int
+nlm4_share_resume (void *call_state)
+{
+        int                             ret             = -1;
+        nlm4_stats                      stat            = nlm4_failed;
+        nfs3_call_state_t              *cs              = NULL;
+
+        if (!call_state)
+                return ret;
+
+        cs = (nfs3_call_state_t *)call_state;
+        nlm4_check_fh_resolve_status (cs, stat, out);
+
+        ret = nlm4_create_share_reservation (cs);
+        if (!ret)
+                stat = nlm4_granted;
+
+ out:
+        nlm4_share_reply (cs, stat);
+        nfs3_call_state_wipe (cs);
+        return 0;
+}
+
+int
+nlm4svc_share (rpcsvc_request_t *req)
+{
+        nlm4_stats                    stat      = nlm4_failed;
+        xlator_t                     *vol       = NULL;
+        nfs3_state_t                 *nfs3      = NULL;
+        nfs3_call_state_t            *cs        = NULL;
+        struct nfs_state             *nfs       = NULL;
+        struct nfs3_fh                fh        = {{0}, };
+        int                           ret       = RPCSVC_ACTOR_ERROR;
+
+        if (!req)
+                return ret;
+
+        nlm4_validate_nfs3_state (req, nfs3, stat, rpcerr, ret);
+        nfs = nfs_state (nfs3->nfsx);
+        nlm4_handle_call_state_init (nfs->nfs3state, cs, req,
+                                     stat, rpcerr);
+
+        nlm4_prep_shareargs (&cs->args.nlm4_shareargs, &cs->lockfh,
+                             &cs->lkowner, cs->cookiebytes);
+
+        if (xdr_to_nlm4_shareargs (req->msg[0],
+                                   &cs->args.nlm4_shareargs) <= 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Error decoding SHARE args");
+                rpcsvc_request_seterr (req, GARBAGE_ARGS);
+                goto rpcerr;
+        }
+
+        fh = cs->lockfh;
+        nlm4_validate_gluster_fh (&fh, stat, nlm4err);
+        nlm4_map_fh_to_volume (cs->nfs3state, fh, req,
+                               vol, stat, nlm4err);
+
+        if (nlm_grace_period && !cs->args.nlm4_shareargs.reclaim) {
+                gf_log (GF_NLM, GF_LOG_DEBUG, "NLM in grace period");
+                stat = nlm4_denied_grace_period;
+                nlm4_share_reply (cs, stat);
+                nfs3_call_state_wipe (cs);
+                return 0;
+        }
+
+        cs->vol = vol;
+        cs->trans = rpcsvc_request_transport_ref(req);
+        nlm4_volume_started_check (nfs3, vol, ret, rpcerr);
+
+        ret = nlm_add_nlmclnt (cs->args.nlm4_shareargs.share.caller_name);
+
+        ret = nfs3_fh_resolve_and_resume (cs, &fh, NULL, nlm4_share_resume);
+
+ nlm4err:
+        if (ret < 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "SHARE call failed");
+                nlm4_share_reply (cs, stat);
+                nfs3_call_state_wipe (cs);
+                return 0;
+        }
+
+ rpcerr:
+        if (ret < 0)
+                nfs3_call_state_wipe (cs);
+
+        return ret;
+}
+
+int
+nlm4_remove_share_reservation (nfs3_call_state_t *cs)
+{
+        int                ret        = -1;
+        uint64_t           ctx        = 0;
+        fsh_mode           req_mode   = 0;
+        fsh_access         req_access = 0;
+        nlm_share_t       *share      = NULL;
+        nlm_share_t       *tmp        = NULL;
+        nlm_client_t      *client     = NULL;
+        char              *caller     = NULL;
+        inode_t           *inode      = NULL;
+        xlator_t          *this       = NULL;
+        struct list_head  *head       = NULL;
+        nlm4_shareargs    *args       = NULL;
+
+        LOCK (&nlm_client_list_lk);
+
+        args = &cs->args.nlm4_shareargs;
+        caller = args->share.caller_name;
+
+        client = __nlm_get_uniq (caller);
+        if (!client) {
+                gf_log (GF_NLM, GF_LOG_ERROR,
+                        "client not found: %s", caller);
+                goto out;
+        }
+
+        inode = cs->resolvedloc.inode;
+        if (!inode) {
+                gf_log (GF_NLM, GF_LOG_ERROR,
+                        "inode not found: client: %s", caller);
+                goto out;
+        }
+
+        this = THIS;
+        ret = inode_ctx_get (inode, this, &ctx);
+        if (ret) {
+                gf_log (GF_NLM, GF_LOG_ERROR,
+                        "no shares found for inode:"
+                        "gfid: %s; client: %s",
+                        inode->gfid, caller);
+                goto out;
+        }
+
+        head = (struct list_head *)ctx;
+        if (list_empty (head)) {
+                ret = -1;
+                goto out;
+        }
+
+        ret = 0;
+        req_mode = args->share.mode;
+        req_access = args->share.access;
+
+        list_for_each_entry_safe (share, tmp, head, inode_list) {
+                ret = ((req_mode == share->mode) &&
+                       (req_access == share->access) &&
+                       nlm_is_oh_same_lkowner (&share->lkowner, &args->share.oh));
+                if (ret) {
+                        list_del (&share->client_list);
+                        list_del (&share->inode_list);
+                        inode_unref (share->inode);
+                        GF_FREE (share);
+                        break;
+                }
+        }
+
+        ret = 0;
+ out:
+        UNLOCK (&nlm_client_list_lk);
+        return ret;
+
+}
+
+int
+nlm4_unshare_resume (void *call_state)
+{
+        int                ret        = -1;
+        nlm4_stats         stat       = nlm4_failed;
+        nfs3_call_state_t *cs         = NULL;
+
+        if (!call_state)
+                return ret;
+
+        cs = (nfs3_call_state_t *)call_state;
+
+        nlm4_check_fh_resolve_status (cs, stat, out);
+        ret = nlm4_remove_share_reservation (cs);
+        if (!ret)
+                stat = nlm4_granted;
+
+ out:
+        nlm4_share_reply (cs, stat);
+        nfs3_call_state_wipe (cs);
+        return 0;
+}
+
+int
+nlm4svc_unshare (rpcsvc_request_t *req)
+{
+        nlm4_stats                    stat      = nlm4_failed;
+        xlator_t                     *vol       = NULL;
+        nfs3_state_t                 *nfs3      = NULL;
+        nfs3_call_state_t            *cs        = NULL;
+        struct nfs_state             *nfs       = NULL;
+        struct nfs3_fh                fh        = {{0}, };
+        int                           ret       = RPCSVC_ACTOR_ERROR;
+
+        if (!req)
+                return ret;
+
+        nlm4_validate_nfs3_state (req, nfs3, stat, rpcerr, ret);
+        nfs = nfs_state (nfs3->nfsx);
+        nlm4_handle_call_state_init (nfs->nfs3state, cs, req,
+                                     stat, rpcerr);
+
+        nlm4_prep_shareargs (&cs->args.nlm4_shareargs, &cs->lockfh,
+                             &cs->lkowner, cs->cookiebytes);
+
+        if (xdr_to_nlm4_shareargs (req->msg[0],
+                                   &cs->args.nlm4_shareargs) <= 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Error decoding UNSHARE args");
+                rpcsvc_request_seterr (req, GARBAGE_ARGS);
+                goto rpcerr;
+        }
+
+        fh = cs->lockfh;
+        nlm4_validate_gluster_fh (&fh, stat, nlm4err);
+        nlm4_map_fh_to_volume (cs->nfs3state, fh, req,
+                               vol, stat, nlm4err);
+
+        if (nlm_grace_period && !cs->args.nlm4_shareargs.reclaim) {
+                gf_log (GF_NLM, GF_LOG_DEBUG, "NLM in grace period");
+                stat = nlm4_denied_grace_period;
+                nlm4_share_reply (cs, stat);
+                nfs3_call_state_wipe (cs);
+                return 0;
+        }
+
+        cs->vol = vol;
+        cs->trans = rpcsvc_request_transport_ref(req);
+        nlm4_volume_started_check (nfs3, vol, ret, rpcerr);
+
+        ret = nfs3_fh_resolve_and_resume (cs, &fh, NULL,
+                                          nlm4_unshare_resume);
+
+ nlm4err:
+        if (ret < 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "UNSHARE call failed");
+                nlm4_share_reply (cs, stat);
+                ret = 0;
+                return 0;
+        }
+
+ rpcerr:
+        if (ret < 0)
+                nfs3_call_state_wipe (cs);
+
+        return ret;
+}
+
+int
+nlm4_free_all_shares (char *caller_name)
+{
+        nlm_share_t             *share      = NULL;
+        nlm_share_t             *tmp        = NULL;
+        nlm_client_t            *client     = NULL;
+
+        LOCK (&nlm_client_list_lk);
+
+        client = __nlm_get_uniq (caller_name);
+        if (!client) {
+                gf_log (GF_NLM, GF_LOG_DEBUG,
+                        "client not found: %s", caller_name);
+                goto out;
+        }
+
+        list_for_each_entry_safe (share, tmp, &client->shares, client_list) {
+                list_del (&share->inode_list);
+                list_del (&share->client_list);
+                inode_unref (share->inode);
+                GF_FREE (share);
+        }
+ out:
+        UNLOCK (&nlm_client_list_lk);
+        return 0;
+}
+
+int
+nlm4svc_free_all (rpcsvc_request_t *req)
+{
+        int                           ret       = RPCSVC_ACTOR_ERROR;
+        nlm4_stats                    stat      = nlm4_failed;
+        nfs3_state_t                 *nfs3      = NULL;
+        nfs3_call_state_t            *cs        = NULL;
+        struct nfs_state             *nfs       = NULL;
+
+        nlm4_validate_nfs3_state (req, nfs3, stat, err, ret);
+        nfs = nfs_state (nfs3->nfsx);
+        nlm4_handle_call_state_init (nfs->nfs3state, cs,
+                                     req, stat, err);
+
+        nlm4_prep_freeallargs (&cs->args.nlm4_freeallargs,
+                               &cs->lkowner);
+
+        if (xdr_to_nlm4_freeallargs (req->msg[0],
+                                     &cs->args.nlm4_freeallargs) <= 0) {
+                gf_log (GF_NLM, GF_LOG_ERROR, "Error decoding FREE_ALL args");
+                rpcsvc_request_seterr (req, GARBAGE_ARGS);
+                goto err;
+        }
+
+        ret = nlm4_free_all_shares (cs->args.nlm4_freeallargs.name);
+        if (ret)
+                goto err;
+
+        ret = nlm_cleanup_fds (cs->args.nlm4_freeallargs.name);
+        if (ret)
+                goto err;
+
+ err:
+        nfs3_call_state_wipe (cs);
+        if (ret)
+                gf_log (GF_NLM, GF_LOG_DEBUG,
+                        "error in free all; stat: %d", stat);
+        return ret;
+
 }
 
 void
@@ -1757,17 +2282,17 @@ rpcsvc_actor_t  nlm4svc_actors[NLM4_PROC_COUNT] = {
         {"LOCK",       NLM4_LOCK_RES,     NULL,              NULL, NULL},
         {"CANCEL",     NLM4_CANCEL_RES,   NULL,              NULL, NULL},
         {"UNLOCK",     NLM4_UNLOCK_RES,   NULL,              NULL, NULL},
-        /* 15 ; 17,18,19 are dummy actors */
+        /* 15 ; procedures 17,18,19 are not defined by nlm */
         {"GRANTED",    NLM4_GRANTED_RES,  NULL,              NULL, NULL},
         {"SM_NOTIFY",  NLM4_SM_NOTIFY,    NULL,              NULL, NULL},
         {"SEVENTEEN",  NLM4_SEVENTEEN,    NULL,              NULL, NULL},
         {"EIGHTEEN",   NLM4_EIGHTEEN,     NULL,              NULL, NULL},
         {"NINETEEN",   NLM4_NINETEEN,     NULL,              NULL, NULL},
         /* 20 */
-        {"SHARE",      NLM4_SHARE,        NULL,              NULL, NULL},
-        {"UNSHARE",    NLM4_UNSHARE,      NULL,              NULL, NULL},
-        {"NM_LOCK",    NLM4_NM_LOCK,      NULL,              NULL, NULL},
-        {"FREE_ALL",   NLM4_FREE_ALL,     nlm4svc_null,      NULL, NULL},
+        {"SHARE",      NLM4_SHARE,        nlm4svc_share,     NULL, NULL},
+        {"UNSHARE",    NLM4_UNSHARE,      nlm4svc_unshare,   NULL, NULL},
+        {"NM_LOCK",    NLM4_NM_LOCK,      nlm4svc_nm_lock,   NULL, NULL},
+        {"FREE_ALL",   NLM4_FREE_ALL,     nlm4svc_free_all,  NULL, NULL},
 };
 
 rpcsvc_program_t        nlm4prog = {
@@ -1804,6 +2329,8 @@ nlm4svc_init(xlator_t *nfsx)
         char *portstr = NULL;
         pthread_t thr;
         struct timeval timeout = {0,};
+        FILE   *pidfile = NULL;
+        pid_t   pid     = -1;
 
         nfs = (struct nfs_state*)nfsx->private;
 
@@ -1870,8 +2397,26 @@ nlm4svc_init(xlator_t *nfsx)
          * Need to figure out a more graceful way
          * killall will cause problems on solaris.
          */
-        ret = runcmd ("killall", "-9", "rpc.statd", NULL);
-        /* if ret == -1, do nothing - case statd was not already running  */
+
+        pidfile = fopen ("/var/run/rpc.statd.pid", "r");
+        if (pidfile) {
+                ret = fscanf (pidfile, "%d", &pid);
+                if (ret <= 0) {
+                        gf_log (GF_NLM, GF_LOG_WARNING, "unable to get pid of "
+                                "rpc.statd");
+                        ret = runcmd ("killall", "-9", "rpc.statd", NULL);
+                } else
+                        kill (pid, SIGKILL);
+
+                fclose (pidfile);
+        } else {
+                gf_log (GF_NLM, GF_LOG_WARNING, "opening the pid file of "
+                        "rpc.statd failed (%s)", strerror (errno));
+                /* if ret == -1, do nothing - case either statd was not
+                 * running or was running in valgrind mode
+                 */
+                ret = runcmd ("killall", "-9", "rpc.statd", NULL);
+        }
 
         ret = unlink ("/var/run/rpc.statd.pid");
         if (ret == -1 && errno != ENOENT) {

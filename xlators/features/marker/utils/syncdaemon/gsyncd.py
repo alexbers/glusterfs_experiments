@@ -17,7 +17,7 @@ from ipaddr import IPAddress, IPNetwork
 
 from gconf import gconf
 from syncdutils import FreeObject, norm, grabpidfile, finalize, log_raise_exception
-from syncdutils import GsyncdError, select
+from syncdutils import GsyncdError, select, set_term_handler
 from configinterface import GConffile
 import resource
 from monitor import monitor
@@ -107,7 +107,8 @@ def startup(**kw):
 
 def main():
     """main routine, signal/exception handling boilerplates"""
-    signal.signal(signal.SIGTERM, lambda *a: finalize(*a, **{'exval': 1}))
+    gconf.starttime = time.time()
+    set_term_handler()
     GLogger.setup()
     excont = FreeObject(exval = 0)
     try:
@@ -160,7 +161,6 @@ def main_i():
     op.add_option('--session-owner',       metavar='ID')
     op.add_option('-s', '--ssh-command',   metavar='CMD',   default='ssh')
     op.add_option('--rsync-command',       metavar='CMD',   default='rsync')
-    op.add_option('--rsync-extra',         metavar='ARGS',  default='-S', help=SUPPRESS_HELP)
     op.add_option('--timeout',             metavar='SEC',   type=int, default=120)
     op.add_option('--connection-timeout',  metavar='SEC',   type=int, default=60, help=SUPPRESS_HELP)
     op.add_option('--sync-jobs',           metavar='N',     type=int, default=3)

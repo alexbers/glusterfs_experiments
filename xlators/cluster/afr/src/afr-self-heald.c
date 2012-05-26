@@ -1,20 +1,11 @@
 /*
-   Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
-   This file is part of GlusterFS.
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
+  This file is part of GlusterFS.
 
-   GlusterFS is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published
-   by the Free Software Foundation; either version 3 of the License,
-   or (at your option) any later version.
-
-   GlusterFS is distributed in the hope that it will be useful, but
-   WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program.  If not, see
-   <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef _CONFIG_H
@@ -28,8 +19,6 @@
 #include "protocol-common.h"
 #include "event-history.h"
 
-#define AFR_POLL_TIMEOUT 600
-
 typedef enum {
         STOP_CRAWL_ON_SINGLE_SUBVOL = 1
 } afr_crawl_flags_t;
@@ -41,7 +30,6 @@ typedef enum {
 
 typedef struct shd_dump {
         dict_t   *dict;
-        time_t   sh_time;
         xlator_t *this;
         int      child;
 } shd_dump_t;
@@ -71,6 +59,24 @@ _crawl_directory (fd_t *fd, loc_t *loc, afr_crawl_data_t *crawl_data);
 
 int
 afr_syncop_find_child_position (void *data);
+
+static int
+_loc_assign_gfid_path (loc_t *loc)
+{
+        int  ret = -1;
+        char gfid_path[64] = {0};
+
+        if (loc->inode && !uuid_is_null (loc->inode->gfid)) {
+                ret = inode_path (loc->inode, NULL, (char**)&loc->path);
+        } else if (!uuid_is_null (loc->gfid)) {
+                snprintf (gfid_path, sizeof (gfid_path), "<gfid:%s>",
+                          uuid_utoa (loc->gfid));
+                loc->path = gf_strdup (gfid_path);
+                if (loc->path)
+                        ret = 0;
+        }
+        return ret;
+}
 
 void
 shd_cleanup_event (void *event)
@@ -118,8 +124,8 @@ _build_index_loc (xlator_t *this, loc_t *loc, char *name, loc_t *parent)
 }
 
 int
-_add_str_to_dict (xlator_t *this, dict_t *output, int child, char *str,
-                  gf_boolean_t dyn)
+_add_path_to_dict (xlator_t *this, dict_t *output, int child, char *path,
+                   struct timeval *tv, gf_boolean_t dyn)
 {
         //subkey not used for now
         int             ret = -1;
@@ -138,15 +144,27 @@ _add_str_to_dict (xlator_t *this, dict_t *output, int child, char *str,
 
         snprintf (key, sizeof (key), "%d-%d-%"PRIu64, xl_id, child, count);
         if (dyn)
-                ret = dict_set_dynstr (output, key, str);
+                ret = dict_set_dynstr (output, key, path);
         else
-                ret = dict_set_str (output, key, str);
+                ret = dict_set_str (output, key, path);
         if (ret) {
                 gf_log (this->name, GF_LOG_ERROR, "%s: Could not add to output",
-                        str);
+                        path);
                 goto out;
         }
 
+        if (!tv)
+                goto inc_count;
+        snprintf (key, sizeof (key), "%d-%d-%"PRIu64"-time", xl_id,
+                  child, count);
+        ret = dict_set_uint32 (output, key, tv->tv_sec);
+        if (ret) {
+                gf_log (this->name, GF_LOG_ERROR, "%s: Could not set time",
+                        path);
+                goto out;
+        }
+
+inc_count:
         snprintf (key, sizeof (key), "%d-%d-count", xl_id, child);
         ret = dict_set_uint64 (output, key, count + 1);
         if (ret) {
@@ -201,23 +219,20 @@ _add_event_to_dict (circular_buffer_t *cb, void *data)
         shd_event = cb->data;
         if (shd_event->child != dump_data->child)
                 goto out;
-        if (cb->tv.tv_sec >= dump_data->sh_time)
-                ret = _add_str_to_dict (dump_data->this, dump_data->dict,
-                                        dump_data->child, shd_event->path,
-                                        _gf_false);
+        ret = _add_path_to_dict (dump_data->this, dump_data->dict,
+                                 dump_data->child, shd_event->path, &cb->tv,
+                                 _gf_false);
 out:
         return ret;
 }
 
 int
-_add_eh_to_dict (xlator_t *this, eh_t *eh, dict_t *dict, time_t sh_time,
-                 int child)
+_add_eh_to_dict (xlator_t *this, eh_t *eh, dict_t *dict, int child)
 {
         shd_dump_t dump_data = {0};
 
         dump_data.this = this;
         dump_data.dict = dict;
-        dump_data.sh_time = sh_time;
         dump_data.child = child;
         eh_dump (eh, &dump_data, _add_event_to_dict);
         return 0;
@@ -243,8 +258,8 @@ _add_summary_to_dict (xlator_t *this, afr_crawl_data_t *crawl_data,
         if (ret)
                 goto out;
 
-        ret = _add_str_to_dict (this, output, crawl_data->child, path,
-                                _gf_true);
+        ret = _add_path_to_dict (this, output, crawl_data->child, path, NULL,
+                                 _gf_true);
 out:
         if (ret && path)
                 GF_FREE (path);
@@ -345,11 +360,7 @@ _self_heal_entry (xlator_t *this, afr_crawl_data_t *crawl_data, gf_dirent_t *ent
         int              ret = 0;
         dict_t           *xattr_rsp = NULL;
 
-        if (uuid_is_null (child->gfid))
-                gf_log (this->name, GF_LOG_DEBUG, "lookup %s", child->path);
-        else
-                gf_log (this->name, GF_LOG_DEBUG, "lookup %s",
-                        uuid_utoa (child->gfid));
+        gf_log (this->name, GF_LOG_DEBUG, "lookup %s", child->path);
 
         ret = syncop_lookup (this, child, NULL,
                              iattr, &xattr_rsp, &parentbuf);
@@ -371,13 +382,6 @@ afr_crawl_done  (int ret, call_frame_t *sync_frame, void *data)
 void
 _do_self_heal_on_subvol (xlator_t *this, int child, afr_crawl_type_t crawl)
 {
-        afr_private_t   *priv = NULL;
-        afr_self_heald_t *shd = NULL;
-
-        priv = this->private;
-        shd = &priv->shd;
-
-        time (&shd->sh_times[child]);
         afr_start_crawl (this, child, crawl, _self_heal_entry,
                          NULL, _gf_true, STOP_CRAWL_ON_SINGLE_SUBVOL,
                          afr_crawl_done);
@@ -511,7 +515,7 @@ _add_all_subvols_eh_to_dict (xlator_t *this, eh_t *eh, dict_t *dict)
         for (i = 0; i < priv->child_count; i++) {
                 if (shd->pos[i] != AFR_POS_LOCAL)
                         continue;
-                _add_eh_to_dict (this, eh, dict, shd->sh_times[i], i);
+                _add_eh_to_dict (this, eh, dict, i);
         }
         return 0;
 }
@@ -578,28 +582,43 @@ afr_poll_self_heal (void *data)
         long             child = (long)data;
         gf_timer_t       *old_timer = NULL;
         gf_timer_t       *new_timer = NULL;
+        shd_pos_t        pos_data = {0};
+        int              ret = 0;
 
         this = THIS;
         priv = this->private;
         shd = &priv->shd;
 
-        _do_self_heal_on_subvol (this, child, INDEX);
-        timeout.tv_sec = AFR_POLL_TIMEOUT;
+        if (shd->pos[child] == AFR_POS_UNKNOWN) {
+                pos_data.this = this;
+                pos_data.child = child;
+                ret = synctask_new (this->ctx->env,
+                                    afr_syncop_find_child_position,
+                                    NULL, NULL, &pos_data);
+                if (!ret)
+                        shd->pos[child] = pos_data.pos;
+        }
+        if (shd->enabled && (shd->pos[child] == AFR_POS_LOCAL))
+                _do_self_heal_on_subvol (this, child, INDEX);
+        timeout.tv_sec = shd->timeout;
         timeout.tv_usec = 0;
         //notify and previous timer should be synchronized.
         LOCK (&priv->lock);
         {
                 old_timer = shd->timer[child];
+                if (shd->pos[child] == AFR_POS_REMOTE)
+                        goto unlock;
                 shd->timer[child] = gf_timer_call_after (this->ctx, timeout,
                                                          afr_poll_self_heal,
                                                          data);
                 new_timer = shd->timer[child];
         }
+unlock:
         UNLOCK (&priv->lock);
 
         if (old_timer)
                 gf_timer_call_cancel (this->ctx, old_timer);
-        if (!new_timer) {
+        if (!new_timer && (shd->pos[child] != AFR_POS_REMOTE)) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "Could not create self-heal polling timer for %s",
                         priv->children[child]->name);
@@ -620,7 +639,7 @@ afr_local_child_poll_self_heal  (int ret, call_frame_t *sync_frame, void *data)
         priv = pos_data->this->private;
         shd = &priv->shd;
         shd->pos[pos_data->child] = pos_data->pos;
-        if (pos_data->pos == AFR_POS_LOCAL)
+        if (pos_data->pos != AFR_POS_REMOTE)
                 afr_poll_self_heal ((void*)(long)pos_data->child);
 out:
         GF_FREE (data);
@@ -758,17 +777,20 @@ int
 afr_crawl_build_child_loc (xlator_t *this, loc_t *child, loc_t *parent,
                            gf_dirent_t *entry, afr_crawl_data_t *crawl_data)
 {
-        int           ret = 0;
+        int           ret = -1;
         afr_private_t *priv = NULL;
 
         priv = this->private;
         if (crawl_data->crawl == FULL) {
                 ret = afr_build_child_loc (this, child, parent, entry->d_name);
         } else {
-                child->path = "";
                 child->inode = inode_new (priv->root_inode->table);
+                if (!child->inode)
+                        goto out;
                 uuid_parse (entry->d_name, child->gfid);
+                ret = _loc_assign_gfid_path (child);
         }
+out:
         return ret;
 }
 
@@ -802,8 +824,6 @@ _process_entries (xlator_t *this, loc_t *parentloc, gf_dirent_t *entries,
                         continue;
                 }
 
-                if (crawl_data->crawl == INDEX)
-                        entry_loc.path = NULL;//HACK
                 loc_wipe (&entry_loc);
                 ret = afr_crawl_build_child_loc (this, &entry_loc, parentloc,
                                                  entry, crawl_data);
@@ -821,10 +841,8 @@ _process_entries (xlator_t *this, loc_t *parentloc, gf_dirent_t *entries,
 
                 link_inode = inode_link (entry_loc.inode, NULL, NULL, &iattr);
                 if (link_inode == NULL) {
-                        char uuidbuf[64];
                         gf_log (this->name, GF_LOG_ERROR, "inode link failed "
-                                "on the inode (%s)",
-                                uuid_utoa_r (entry_loc.gfid, uuidbuf));
+                                "on the inode (%s)",entry_loc.path);
                         ret = -1;
                         goto out;
                 }
@@ -839,10 +857,7 @@ _process_entries (xlator_t *this, loc_t *parentloc, gf_dirent_t *entries,
         }
         ret = 0;
 out:
-        if (crawl_data->crawl == INDEX)
-                entry_loc.path = NULL;
-        if (entry_loc.path)
-                loc_wipe (&entry_loc);
+        loc_wipe (&entry_loc);
         return ret;
 }
 
@@ -861,10 +876,10 @@ _crawl_directory (fd_t *fd, loc_t *loc, afr_crawl_data_t *crawl_data)
 
         GF_ASSERT (loc->inode);
 
-        if (loc->path)
+        if (crawl_data->crawl == FULL)
                 gf_log (this->name, GF_LOG_DEBUG, "crawling %s", loc->path);
         else
-                gf_log (this->name, GF_LOG_DEBUG, "crawling %s",
+                gf_log (this->name, GF_LOG_DEBUG, "crawling INDEX %s",
                         uuid_utoa (loc->gfid));
 
         while (1) {

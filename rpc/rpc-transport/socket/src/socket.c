@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2010-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -824,6 +815,7 @@ __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vecto
         uint32_t          remaining_size         = 0;
         ssize_t           readsize               = 0;
         size_t            size = 0;
+        char             *proghdr_buf = NULL;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -880,9 +872,10 @@ __socket_read_vectored_request (rpc_transport_t *this, rpcsvc_vector_sizer vecto
 
         case SP_STATE_READ_VERFBYTES:
 sp_state_read_verfbytes:
+                proghdr_buf = priv->incoming.frag.fragcurrent;
                 priv->incoming.frag.call_body.request.vector_sizer_state =
                         vector_sizer (priv->incoming.frag.call_body.request.vector_sizer_state,
-                                      &readsize,
+                                      &readsize, proghdr_buf,
                                       priv->incoming.frag.fragcurrent);
                 __socket_proto_init_pending (priv, readsize);
                 priv->incoming.frag.call_body.request.vector_state
@@ -895,7 +888,7 @@ sp_state_read_verfbytes:
 sp_state_reading_proghdr:
                 priv->incoming.frag.call_body.request.vector_sizer_state =
                         vector_sizer (priv->incoming.frag.call_body.request.vector_sizer_state,
-                                      &readsize,
+                                      &readsize, proghdr_buf,
                                       priv->incoming.frag.fragcurrent);
                 if (readsize == 0) {
                         priv->incoming.frag.call_body.request.vector_state =
@@ -1047,12 +1040,14 @@ out:
 inline int
 __socket_read_accepted_successful_reply (rpc_transport_t *this)
 {
-        socket_private_t *priv                     = NULL;
-        int               ret                      = 0;
-        struct iobuf     *iobuf                    = NULL;
-        uint32_t          gluster_read_rsp_hdr_len = 0;
-        gfs3_read_rsp     read_rsp                 = {0, };
-        size_t            size                     = 0;
+        socket_private_t *priv              = NULL;
+        int               ret               = 0;
+        struct iobuf     *iobuf             = NULL;
+        gfs3_read_rsp     read_rsp          = {0, };
+        ssize_t           size              = 0;
+        ssize_t           default_read_size = 0;
+        char             *proghdr_buf       = NULL;
+        XDR               xdr;
 
         GF_VALIDATE_OR_GOTO ("socket", this, out);
         GF_VALIDATE_OR_GOTO ("socket", this->private, out);
@@ -1062,16 +1057,12 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
         switch (priv->incoming.frag.call_body.reply.accepted_success_state) {
 
         case SP_STATE_ACCEPTED_SUCCESS_REPLY_INIT:
-                gluster_read_rsp_hdr_len = xdr_sizeof ((xdrproc_t) xdr_gfs3_read_rsp,
-                                                       &read_rsp);
+                default_read_size = xdr_sizeof ((xdrproc_t) xdr_gfs3_read_rsp,
+                                                &read_rsp);
 
-                if (gluster_read_rsp_hdr_len == 0) {
-                        gf_log (this->name, GF_LOG_ERROR,
-                                "xdr_sizeof on gfs3_read_rsp failed");
-                        ret = -1;
-                        goto out;
-                }
-                __socket_proto_init_pending (priv, gluster_read_rsp_hdr_len);
+                proghdr_buf = priv->incoming.frag.fragcurrent;
+
+                __socket_proto_init_pending (priv, default_read_size);
 
                 priv->incoming.frag.call_body.reply.accepted_success_state
                         = SP_STATE_READING_PROC_HEADER;
@@ -1081,9 +1072,40 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
         case SP_STATE_READING_PROC_HEADER:
                 __socket_proto_read (priv, ret);
 
-                priv->incoming.frag.call_body.reply.accepted_success_state
-                        = SP_STATE_READ_PROC_HEADER;
+                /* there can be 'xdata' in read response, figure it out */
+                xdrmem_create (&xdr, proghdr_buf, default_read_size,
+                               XDR_DECODE);
 
+                /* This will fail if there is xdata sent from server, if not,
+                   well and good, we don't need to worry about  */
+                xdr_gfs3_read_rsp (&xdr, &read_rsp);
+
+                if (read_rsp.xdata.xdata_val)
+                        free (read_rsp.xdata.xdata_val);
+
+                /* need to round off to proper roof (%4), as XDR packing pads
+                   the end of opaque object with '0' */
+                size = roof (read_rsp.xdata.xdata_len, 4);
+
+                if (!size) {
+                        priv->incoming.frag.call_body.reply.accepted_success_state
+                                = SP_STATE_READ_PROC_OPAQUE;
+                        goto read_proc_opaque;
+                }
+
+                __socket_proto_init_pending (priv, size);
+
+                priv->incoming.frag.call_body.reply.accepted_success_state
+                        = SP_STATE_READING_PROC_OPAQUE;
+
+        case SP_STATE_READING_PROC_OPAQUE:
+                __socket_proto_read (priv, ret);
+
+                priv->incoming.frag.call_body.reply.accepted_success_state
+                        = SP_STATE_READ_PROC_OPAQUE;
+
+        case SP_STATE_READ_PROC_OPAQUE:
+        read_proc_opaque:
                 if (priv->incoming.payload_vector.iov_base == NULL) {
 
                         size = (RPC_FRAGSIZE (priv->incoming.fraghdr) -
@@ -1115,6 +1137,9 @@ __socket_read_accepted_successful_reply (rpc_transport_t *this)
 
                 priv->incoming.frag.fragcurrent
                         = priv->incoming.payload_vector.iov_base;
+
+                priv->incoming.frag.call_body.reply.accepted_success_state
+                        = SP_STATE_READ_PROC_HEADER;
 
                 /* fall through */
 
@@ -1538,7 +1563,6 @@ __socket_proto_state_machine (rpc_transport_t *this,
                 case SP_STATE_READ_FRAGHDR:
 
                         priv->incoming.fraghdr = ntoh32 (priv->incoming.fraghdr);
-                        priv->incoming.record_state = SP_STATE_READING_FRAG;
                         priv->incoming.total_bytes_read
                                 += RPC_FRAGSIZE(priv->incoming.fraghdr);
                         iobuf = iobuf_get2 (this->ctx->iobuf_pool,
@@ -1552,6 +1576,7 @@ __socket_proto_state_machine (rpc_transport_t *this,
                         priv->incoming.iobuf = iobuf;
                         priv->incoming.iobuf_size = 0;
                         priv->incoming.frag.fragcurrent = iobuf_ptr (iobuf);
+                        priv->incoming.record_state = SP_STATE_READING_FRAG;
                         /* fall through */
 
                 case SP_STATE_READING_FRAG:

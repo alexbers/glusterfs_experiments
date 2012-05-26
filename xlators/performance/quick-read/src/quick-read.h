@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2009-2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 #ifndef __QUICK_READ_H
@@ -53,7 +44,6 @@ struct qr_fd_ctx {
         struct list_head  waiting_ops;
         gf_lock_t         lock;
         struct list_head  inode_list;
-        struct list_head  tmp_list;
         fd_t             *fd;
         dict_t           *xdata;
 };
@@ -69,7 +59,7 @@ struct qr_local {
         int32_t           op_errno;
         uint32_t          open_count;
         call_stub_t      *stub;
-        struct list_head  fd_list;
+        struct list_head  list;
         gf_lock_t         lock;
 };
 typedef struct qr_local qr_local_t;
@@ -114,6 +104,13 @@ struct qr_private {
         qr_inode_table_t  table;
 };
 typedef struct qr_private qr_private_t;
+
+struct qr_unlink_ctx {
+        struct list_head  list;
+        qr_fd_ctx_t      *fdctx;
+        char              need_open;
+};
+typedef struct qr_unlink_ctx qr_unlink_ctx_t;
 
 void qr_local_free (qr_local_t *local);
 

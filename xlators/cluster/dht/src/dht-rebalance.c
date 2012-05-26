@@ -1,20 +1,11 @@
 /*
-  Copyright (c) 2011 Gluster, Inc. <http://www.gluster.com>
+  Copyright (c) 2008-2012 Red Hat, Inc. <http://www.redhat.com>
   This file is part of GlusterFS.
 
-  GlusterFS is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published
-  by the Free Software Foundation; either version 3 of the License,
-  or (at your option) any later version.
-
-  GlusterFS is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program.  If not, see
-  <http://www.gnu.org/licenses/>.
+  This file is licensed to you under your choice of the GNU Lesser
+  General Public License, version 3 or any later version (LGPLv3 or
+  later), or the GNU General Public License, version 2 (GPLv2), in all
+  cases as published by the Free Software Foundation.
 */
 
 
@@ -947,11 +938,8 @@ int
 dht_start_rebalance_task (xlator_t *this, call_frame_t *frame)
 {
         int         ret     = -1;
-        dht_conf_t *conf    = NULL;
 
-        conf = this->private;
-
-        ret = synctask_new (conf->env, rebalance_task,
+        ret = synctask_new (this->ctx->env, rebalance_task,
                             rebalance_task_completion,
                             frame, frame);
         return ret;
@@ -1062,9 +1050,15 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
         char                    *uuid_str       = NULL;
         uuid_t                   node_uuid      = {0,};
         int                      readdir_operrno = 0;
+        struct timeval           dir_start      = {0,};
+        struct timeval           end            = {0,};
+        double                   elapsed        = {0,};
+        struct timeval           start          = {0,};
 
         gf_log (this->name, GF_LOG_INFO, "migrate data called on %s",
                 loc->path);
+        gettimeofday (&dir_start, NULL);
+
         fd = fd_create (loc->inode, defrag->pid);
         if (!fd) {
                 gf_log (this->name, GF_LOG_ERROR, "Failed to create fd");
@@ -1109,7 +1103,9 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                                 continue;
 
                         defrag->num_files_lookedup++;
-
+                        if (defrag->stats == _gf_true) {
+                                gettimeofday (&start, NULL);
+                        }
                         loc_wipe (&entry_loc);
                         ret =dht_build_child_loc (this, &entry_loc, loc,
                                                   entry->d_name);
@@ -1229,6 +1225,15 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                                 defrag->total_data += iatt.ia_size;
                         }
                         UNLOCK (&defrag->lock);
+                        if (defrag->stats == _gf_true) {
+                                gettimeofday (&end, NULL);
+                                elapsed = (end.tv_sec - start.tv_sec) * 1e6 +
+                                          (end.tv_usec - start.tv_usec);
+                                gf_log (this->name, GF_LOG_INFO, "Migration of "
+                                        "file:%s size:%"PRIu64" bytes took %.2f"
+                                        "secs", entry_loc.path, iatt.ia_size,
+                                         elapsed/1e6);
+                        }
                 }
 
                 gf_dirent_free (&entries);
@@ -1238,6 +1243,12 @@ gf_defrag_migrate_data (xlator_t *this, gf_defrag_info_t *defrag, loc_t *loc,
                 if (readdir_operrno == ENOENT)
                         break;
         }
+
+        gettimeofday (&end, NULL);
+        elapsed = (end.tv_sec - dir_start.tv_sec) * 1e6 +
+                  (end.tv_usec - dir_start.tv_usec);
+        gf_log (this->name, GF_LOG_INFO, "Migration operation on dir %s took "
+                "%.2f secs", loc->path, elapsed/1e6);
         ret = 0;
 out:
         if (free_entries)
@@ -1428,6 +1439,8 @@ gf_defrag_start_crawl (void *data)
         defrag = conf->defrag;
         if (!defrag)
                 goto out;
+
+        gettimeofday (&defrag->start_time, NULL);
         dht_build_root_inode (this, &defrag->root_inode);
         if (!defrag->root_inode)
                 goto out;
@@ -1564,6 +1577,9 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         uint64_t lookup = 0;
         uint64_t failures = 0;
         char     *status = "";
+        double   elapsed = 0;
+        struct timeval end = {0,};
+
 
         if (!defrag)
                 goto out;
@@ -1576,6 +1592,10 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         size   = defrag->total_data;
         lookup = defrag->num_files_lookedup;
         failures = defrag->total_failures;
+
+        gettimeofday (&end, NULL);
+
+        elapsed = end.tv_sec - defrag->start_time.tv_sec;
 
         if (!dict)
                 goto log;
@@ -1599,6 +1619,12 @@ gf_defrag_status_get (gf_defrag_info_t *defrag, dict_t *dict)
         if (ret)
                 gf_log (THIS->name, GF_LOG_WARNING,
                         "failed to set status");
+        if (elapsed) {
+                ret = dict_set_double (dict, "run-time", elapsed);
+                if (ret)
+                        gf_log (THIS->name, GF_LOG_WARNING,
+                                "failed to set run-time");
+        }
 
         ret = dict_set_uint64 (dict, "failures", failures);
 log:
@@ -1620,7 +1646,8 @@ log:
                 break;
         }
 
-        gf_log (THIS->name, GF_LOG_INFO, "Rebalance is %s", status);
+        gf_log (THIS->name, GF_LOG_INFO, "Rebalance is %s. Time taken is %.2f "
+                "secs", status, elapsed);
         gf_log (THIS->name, GF_LOG_INFO, "Files migrated: %"PRIu64", size: %"
                 PRIu64", lookups: %"PRIu64", failures: %"PRIu64, files, size,
                 lookup, failures);

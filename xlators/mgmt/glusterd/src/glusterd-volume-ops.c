@@ -718,7 +718,7 @@ glusterd_op_stage_create_volume (dict_t *dict, char **op_errstr)
                         ret = glusterd_brick_create_path (brick_info->hostname,
                                                           brick_info->path,
                                                           volume_uuid,
-                                                          0777, op_errstr);
+                                                          op_errstr);
                         if (ret)
                                 goto out;
                         brick_list = tmpptr;
@@ -841,21 +841,6 @@ glusterd_op_stage_start_volume (dict_t *dict, char **op_errstr)
                                 "Unable to resolve brick %s:%s",
                                 brickinfo->hostname, brickinfo->path);
                         goto out;
-                }
-
-                /* we should not be creating the directory if 'force' option
-                   is not given. This may lead to issues where the actual data
-                   disk is not mounted after a machine reboot, but because
-                   'glusterd' restarts the processes, the export directories
-                   can be automatically created and brick would start */
-                if ((flags & GF_CLI_FLAG_OP_FORCE) &&
-                    !uuid_compare (brickinfo->uuid, priv->uuid)) {
-                        ret = glusterd_brick_create_path (brickinfo->hostname,
-                                                          brickinfo->path,
-                                                          volinfo->volume_id,
-                                                          0777, op_errstr);
-                        if (ret)
-                                goto out;
                 }
 
                 if (!(flags & GF_CLI_FLAG_OP_FORCE)) {
@@ -1596,8 +1581,14 @@ glusterd_op_statedump_volume (dict_t *dict, char **op_errstr)
                         ret = glusterd_brick_statedump (volinfo, brickinfo,
                                                         options, option_cnt,
                                                         op_errstr);
+                        /* Let us take the statedump of other bricks instead of
+                         * exiting, if statedump of this brick fails.
+                         */
                         if (ret)
-                                goto out;
+                                gf_log (THIS->name, GF_LOG_WARNING, "could not "
+                                        "take the statedump of the brick %s:%s."
+                                        " Proceeding to other bricks",
+                                        brickinfo->hostname, brickinfo->path);
                 }
         }
 
