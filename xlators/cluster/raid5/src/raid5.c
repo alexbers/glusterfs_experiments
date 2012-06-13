@@ -157,8 +157,7 @@ out:
 }
 
 int32_t
-stripe_ctx_handle (xlator_t *this, call_frame_t *prev, stripe_local_t *local,
-                   dict_t *dict)
+stripe_ctx_handle (xlator_t *this, stripe_local_t *local, dict_t *dict)
 {
         char            key[256]       = {0,};
         data_t         *data            = NULL;
@@ -489,24 +488,20 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         int32_t         callcnt     = 0;
         stripe_local_t *local       = NULL;
-        call_frame_t   *prev        = NULL;
         int             ret         = 0;
-        int             is_first    = 0;
+        int             node_index  = -1;
 
-        if (!this || !frame || !frame->local || !cookie) {
+        if (!this || !frame || !frame->local) {
                 gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
                 goto out;
         }
         
-        prev = cookie;
+        node_index = cookie;
         local = frame->local;
 
         LOCK (&frame->lock);
         {
                 callcnt = --local->call_count;
-
-                is_first = local->is_first;
-                local->is_first = 0;
                 
                 if (op_ret == -1) {
                         if (op_errno != ENOENT)
@@ -516,9 +511,13 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                         strerror (op_errno));
                         if (local->op_errno != ESTALE)
                                 local->op_errno = op_errno;
-                        if (((op_errno != ENOENT) && (op_errno != ENOTCONN)) ||
-                            is_first )
+                        
+                        if(local->bad_node_index != -1 && 
+                           local->bad_node_index != node_index) {
                                 local->failed = 1;
+                        }
+                        local->bad_node_index = node_index;
+                                                        
                         if (op_errno == ENOENT)
                                 local->entry_self_heal_needed = 1;
                 }
@@ -527,15 +526,19 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->op_ret = 0;
 
                         if (IA_ISREG (buf->ia_type)) {
-                                ret = stripe_ctx_handle(this, prev, local,
-                                                         xdata);
+                                ret = stripe_ctx_handle(this, local, xdata);
                                 if (ret)
                                         gf_log (this->name, GF_LOG_ERROR,
                                                  "Error getting fctx info from"
                                                  " dict");
                         }
-                        
-                        if (is_first) {
+                        if(local->bad_node_index!=-1 && 
+                           local->fctx->bad_node_index!=local->bad_node_index) 
+                                local->failed = 1;
+
+                        if (local->is_first) {
+                                local->is_first = 0;
+
                                 local->stbuf      = *buf;
                                 local->postparent = *postparent;
                                 local->inode = inode_ref (inode);
@@ -559,8 +562,6 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->stbuf_blocks      += buf->ia_blocks;
                         local->postparent_blocks += postparent->ia_blocks;
 
-                        if (local->stbuf_size < buf->ia_size)
-                                local->stbuf_size = buf->ia_size;
                         if (local->postparent_size < postparent->ia_size)
                                 local->postparent_size = postparent->ia_size;
 
@@ -577,7 +578,6 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         }
         UNLOCK (&frame->lock);
 
-        gf_log (this->name, GF_LOG_WARNING, "BAY: callcnt = %d", callcnt);
         if (!callcnt) {
                 gf_log (this->name, GF_LOG_WARNING, "BAY: stripe_lookup_cbk ending op_ret = %d", local->op_ret);
 
@@ -648,6 +648,11 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
         local->op_ret = -1;
         local->is_first = 1;
+        if(priv->nodes_down==0)
+                local->bad_node_index = -1;
+        else
+                local->bad_node_index = priv->bad_node_index;
+        
         frame->local = local;
         loc_copy (&local->loc, loc);
 
@@ -679,7 +684,8 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         
         for (i=0; i<priv->child_count; i++) {
                   if(priv->state[i]) {
-                        STACK_WIND (frame, stripe_lookup_cbk, priv->xl_array[i],
+                        STACK_WIND_COOKIE (frame, stripe_lookup_cbk, i, 
+                                priv->xl_array[i],
                                 priv->xl_array[i]->fops->lookup, loc, xdata);
                   }
         }
@@ -5421,7 +5427,7 @@ stripe_readdirp_lookup_cbk (call_frame_t *frame, void *cookie,
                 stripe_iatt_merge (stbuf, &entry->d_stat);
                 local->stbuf_blocks += stbuf->ia_blocks;
 
-                stripe_ctx_handle (this, prev, local, xattr);
+                stripe_ctx_handle (this, local, xattr);
         }
 unlock:
         UNLOCK(&frame->lock);
