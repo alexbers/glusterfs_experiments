@@ -354,7 +354,9 @@ stripe_entry_self_heal (call_frame_t *frame, xlator_t *this,
         stripe_private_t *priv   = NULL;
         dict_t           *xdata   = NULL;
         int               ret    = 0;
+        int32_t           op_errno = EINVAL;
 
+        
         if (!local || !this || !frame) {
                 gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
                 goto out;
@@ -370,10 +372,7 @@ stripe_entry_self_heal (call_frame_t *frame, xlator_t *this,
         if (!rframe) {
                 goto out;
         }
-        rlocal = mem_get0 (this->local_pool);
-        if (!rlocal) {
-                goto out;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(rlocal, out);
         rframe->local = rlocal;
         rlocal->call_count = priv->child_count;
         loc_copy (&rlocal->loc, &local->loc);
@@ -641,11 +640,7 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
         
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         local->is_first = 1;
         if(priv->nodes_down==0)
@@ -775,11 +770,7 @@ stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
 
         priv = this->private;
         
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         local->is_first = 1;
         frame->local = local;
@@ -870,11 +861,7 @@ stripe_statfs (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
         priv = this->private;
                
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         local->op_errno = ENOTCONN;
         frame->local = local;
@@ -1069,11 +1056,8 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
         }
         
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
+
         local->op_ret = -1;
         local->is_first = 1;
         local->fctx = fctx;
@@ -1205,11 +1189,7 @@ stripe_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         if (!IA_ISDIR (loc->inode->ia_type) &&
@@ -1254,11 +1234,7 @@ stripe_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         trav = this->children;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->call_count = priv->child_count;
@@ -1421,11 +1397,8 @@ stripe_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
+
         local->op_ret = -1;
         loc_copy (&local->loc, oldloc);
         loc_copy (&local->loc2, newloc);
@@ -1561,11 +1534,7 @@ stripe_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         loc_copy (&local->loc, loc);
         local->xflag = xflag;
@@ -1695,11 +1664,7 @@ stripe_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags, dict_t
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         loc_copy (&local->loc, loc);
@@ -2056,11 +2021,7 @@ stripe_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
                 }
 
                 /* Initialization */
-                local = mem_get0 (this->local_pool);
-                if (!local) {
-                        op_errno = ENOMEM;
-                        goto err;
-                }
+                RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
                 local->op_ret = -1;
                 local->op_errno = ENOTCONN;
                 local->stripe_size = stripe_get_matching_bs (loc->path,
@@ -2269,11 +2230,7 @@ stripe_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         local->call_count = priv->child_count;
         if (xdata)
@@ -2395,11 +2352,7 @@ stripe_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc, 
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->call_count = priv->child_count;
@@ -2710,11 +2663,7 @@ stripe_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         local->op_errno = ENOTCONN;
         local->stripe_size = stripe_get_matching_bs (loc->path,
@@ -2847,11 +2796,7 @@ stripe_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
         }
         
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
 
         /* files opened in O_APPEND mode does not allow lseek() on fd */
         flags &= ~O_APPEND;
@@ -2954,12 +2899,7 @@ stripe_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_
         }
         
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         frame->local = local;
         local->call_count = priv->child_count - priv->nodes_down;
         local->fd = fd_ref (fd);
@@ -3046,12 +2986,7 @@ stripe_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         priv = this->private;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->call_count = priv->child_count;
@@ -3130,12 +3065,7 @@ stripe_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
         priv = this->private;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
 
@@ -3238,12 +3168,7 @@ stripe_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, dict
         priv = this->private;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
 
@@ -3347,12 +3272,7 @@ stripe_fstat (call_frame_t *frame,
         priv = this->private;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->fctx = fctx;
@@ -3541,12 +3461,7 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
                 goto err;
         }
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->fctx = fctx;
@@ -3629,12 +3544,7 @@ stripe_fsyncdir (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, d
         trav = this->children;
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         local->call_count = priv->child_count;
@@ -4162,12 +4072,7 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         //        (int) req_block_start, (int) req_block_end, (int) num_stripe, 
         //        (int) priv->child_count);
         
-        local = mem_get0 (this->local_pool);
-
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         frame->local = local;
 
         /* This is where all the vectors should be copied. */
@@ -4200,12 +4105,7 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
                         continue;
                 
                 rframe = copy_frame (frame);
-                rlocal = mem_get0 (this->local_pool);
-
-                if (!rlocal) {
-                        op_errno = ENOMEM;
-                        goto err;
-                }
+                RAID5_LOCAL_ALLOC_OR_GOTO(rlocal,err);
                 
                 if(index == req_block_start)
                         frame_offset = index*stripe_size + offset % stripe_size;
@@ -4264,12 +4164,7 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
                                         continue;
                             
                                 rrframe = copy_frame (rframe);
-                                rrlocal = mem_get0 (this->local_pool);
-
-                                if (!rrlocal) {
-                                        op_errno = ENOMEM;
-                                        goto err;
-                                }
+                                RAID5_LOCAL_ALLOC_OR_GOTO(rrlocal,err);
 
                                 rrframe->local = rrlocal;
                                 rrlocal->orig_frame = rframe;
@@ -4788,7 +4683,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         struct saved_write_contex *wc = NULL;
         
         //int32_t           write_op_ret = -1;
-        int32_t           write_op_errno = EINVAL;
+        int32_t           op_errno = EINVAL;
 
         unsigned char    *old_data = NULL;
         unsigned char    *new_data = NULL;
@@ -4804,7 +4699,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         priv = this->private;
         
         if(read_op_ret ==  -1 && read_op_errno != ENOENT) {
-                write_op_errno = read_op_errno;
+                op_errno = read_op_errno;
                 goto err;
         }
         
@@ -4823,7 +4718,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         old_data = GF_CALLOC (data_size, sizeof(char),gf_stripe_mt_char);
         new_data = GF_CALLOC (data_size, sizeof(char),gf_stripe_mt_char);
         if ( !old_data || !new_data ) {
-                write_op_errno = ENOMEM;
+                op_errno = ENOMEM;
                 goto err;                
         }
         
@@ -4847,7 +4742,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         
         inode_ctx_get (write_fd->inode, this, &tmp_fctx);
         if (!tmp_fctx) {
-                write_op_errno = EINVAL;
+                op_errno = EINVAL;
                 goto err;
         }
         fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
@@ -4865,11 +4760,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         /* File has to be stripped across the child nodes */
         remaining_size = data_size;
 
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                write_op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         frame->local = local;
         local->stripe_size = stripe_size;
         local->fd = fd_ref (write_fd);
@@ -4896,11 +4787,8 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
             begin_group_block!=full_block_end+1; 
             begin_group_block+=priv->child_count) {
                 rframe = copy_frame (frame);
-                rlocal = mem_get0 (this->local_pool);
-                if (!rlocal) {
-                        write_op_errno = ENOMEM;
-                        goto err;
-                }
+
+                RAID5_LOCAL_ALLOC_OR_GOTO(rlocal,err);
                 
                 rframe->local = rlocal;
                 rlocal->orig_frame = frame;
@@ -4908,7 +4796,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 rlocal->checksum_xor_with = GF_CALLOC(stripe_size, sizeof (char),
                                                       gf_stripe_mt_char);
                 if (!rlocal->checksum_xor_with) {
-                        write_op_errno = ENOMEM;
+                        op_errno = ENOMEM;
                         goto err;                      
                 }
                 
@@ -4944,11 +4832,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         idx = curr_block % priv->child_count;
                         
                         rrframe = copy_frame (rframe);
-                        rrlocal = mem_get0 (this->local_pool);
-                        if (!rrlocal) {
-                                write_op_errno = ENOMEM;
-                                goto err;
-                        }
+                        RAID5_LOCAL_ALLOC_OR_GOTO(rrlocal,err);
                         
                         rrframe->local = rrlocal;
                         rrlocal->orig_frame = rframe;
@@ -4966,7 +4850,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         tmp_vec = GF_CALLOC (tmp_count, sizeof (struct iovec),
                                         gf_stripe_mt_iovec);
                         if (!tmp_vec) {
-                                write_op_errno = ENOMEM;
+                                op_errno = ENOMEM;
                                 goto err;
                         }
                         tmp_count = iov_subset (write_vector, write_count, offset_offset,
@@ -5018,7 +4902,7 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
 err:
         STRIPE_STACK_UNWIND (writev, frame, -1, 
-                             write_op_errno, NULL, NULL, NULL);
+                             op_errno, NULL, NULL, NULL);
 mem_clean:
         
         if(old_data)
@@ -5571,16 +5455,10 @@ unlock:
 
                 if (!local_frame) {
                         op_errno = ENOMEM;
-                        op_ret = -1;
-                        goto out;
+                        goto err;
                 }
 
-                local_ent = mem_get0 (this->local_pool);
-                if (!local_ent) {
-                        op_errno = ENOMEM;
-                        op_ret = -1;
-                        goto out;
-                }
+                RAID5_LOCAL_ALLOC_OR_GOTO(local_ent,err);
 
                 local_ent->orig_frame = frame;
 
@@ -5599,6 +5477,9 @@ unlock:
                 }
                 inode_unref (loc.inode);
         }
+        goto out;
+err:
+        op_ret = -1;
 out:
         if (!count) {
                 /* all entries are directories */
@@ -5638,11 +5519,7 @@ stripe_readdirp (call_frame_t *frame, xlator_t *this,
         }
 
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
 
         frame->local = local;
 
@@ -6215,11 +6092,7 @@ stripe_getxattr (call_frame_t *frame, xlator_t *this,
         gf_log (this->name, GF_LOG_WARNING,
                 "BAY: getxattr");
         /* Initialization */
-        local = mem_get0 (this->local_pool);
-        if (!local) {
-                op_errno = ENOMEM;
-                goto err;
-        }
+        RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
         local->op_ret = -1;
         frame->local = local;
         loc_copy (&local->loc, loc);

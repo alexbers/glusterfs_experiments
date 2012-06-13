@@ -65,6 +65,18 @@
                 }                                         \
         } while (0)
 
+/* try alloc and if it fails, goto label */
+#define RAID5_LOCAL_ALLOC_OR_GOTO(var, label) do {                  \
+                var = mem_get0 (THIS->local_pool);                  \
+                if (!var) {                                         \
+                        gf_log (this->name, GF_LOG_ERROR,           \
+                                "out of memory :(");                \
+                        op_errno = ENOMEM;                          \
+                        goto label;                                 \
+                }                                                   \
+        } while (0);
+        
+        
 typedef struct stripe_xattr_sort {
         int32_t  pos;
         int32_t  xattr_len;
@@ -212,6 +224,8 @@ struct stripe_local {
         
         int                  xflag;
         mode_t               umask;
+
+        int32_t              bad_node_index; /* equals -1 if all nodes are good */
         
         unsigned char       *checksum_xor_with; // always has stripe_size
 };
