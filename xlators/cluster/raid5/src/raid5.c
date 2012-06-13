@@ -18,19 +18,14 @@
 */
 
 /**
- * xlators/cluster/stripe:
- *    Stripe translator, stripes the data across its child nodes,
- *    as per the options given in the volfile. The striping works
- *    fairly simple. It writes files at different offset as per
- *    calculation. So, 'ls -l' output at the real posix level will
- *    show file size bigger than the actual size. But when one does
- *    'df' or 'du <file>', real size of the file on the server is shown.
- *
- * WARNING:
- *  Stripe translator can't regenerate data if a child node gets disconnected.
- *  So, no 'self-heal' for stripe. Hence the advice, use stripe only when its
- *  very much necessary, or else, use it in combination with AFR, to have a
- *  backup copy.
+ * xlators/cluster/raid5:
+ *    Raid5 translator. The purpose of translator is to make volume alive
+ *    after one of subvolumes is down. For handling this situation 
+ *    RAID5-like ditstributed checksums are used. Checksum consumes one volume
+ *    in sum.
+ *    Write speed is twice slow than in stripe translator. Reading is fast.
+ *    We don't check checksums while reading the file, we do that only when
+ *    one node is down.
  */
 //#include <attr/attributes.h>
 #include <fnmatch.h>
@@ -167,7 +162,6 @@ stripe_ctx_handle (xlator_t *this, call_frame_t *prev, stripe_local_t *local,
 {
         char            key[256]       = {0,};
         data_t         *data            = NULL;
-        //int32_t         index           = 0;
         stripe_private_t *priv          = NULL;
         int32_t         ret             = -1;
 
@@ -234,7 +228,6 @@ out:
 
 int32_t
 stripe_xattr_request_build (xlator_t *this, dict_t *dict, uint64_t stripe_size,
-                            uint32_t stripe_count, uint32_t stripe_index, 
                             uint64_t real_size, uint32_t bad_node_index
                            )
 {
@@ -243,22 +236,6 @@ stripe_xattr_request_build (xlator_t *this, dict_t *dict, uint64_t stripe_size,
 
         sprintf (key, "trusted.%s.stripe-size", this->name);
         ret = dict_set_int64 (dict, key, stripe_size);
-        if (ret) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "failed to set %s in xattr_req dict", key);
-                goto out;
-        }
-
-        sprintf (key, "trusted.%s.stripe-count", this->name);
-        ret = dict_set_int32 (dict, key, stripe_count);
-        if (ret) {
-                gf_log (this->name, GF_LOG_WARNING,
-                        "failed to set %s in xattr_req dict", key);
-                goto out;
-        }
-
-        sprintf (key, "trusted.%s.stripe-index", this->name);
-        ret = dict_set_int32 (dict, key, stripe_index);
         if (ret) {
                 gf_log (this->name, GF_LOG_WARNING,
                         "failed to set %s in xattr_req dict", key);
@@ -691,7 +668,7 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         
         if (IA_ISREG (loc->inode->ia_type) ||
             (loc->inode->ia_type == IA_INVAL)) {
-                ret = stripe_xattr_request_build (this, xdata, 8, 4, 4, 8, 4);
+                ret = stripe_xattr_request_build (this, xdata, 8, 8, 4);
                 if (ret)
                         gf_log (this->name , GF_LOG_ERROR, "Failed to build"
                                 " xattr request for %s", loc->path);
@@ -1998,7 +1975,7 @@ stripe_mknod_first_ifreg_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 dict_copy (local->xattr, dict);
 
                 ret = stripe_xattr_request_build (this, dict, local->stripe_size,
-                                                  priv->child_count, i, 0, 
+                                                  0, 
                                                   priv->nodes_down ? priv->bad_node_index : -1
                                                  );
                 if (ret)
@@ -2107,7 +2084,7 @@ stripe_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
                 dict_copy (xdata, dict);
 
                 ret = stripe_xattr_request_build (this, dict, local->stripe_size,
-                                        priv->child_count, i, 0, 
+                                        0, 
                                         priv->nodes_down ? priv->bad_node_index : -1
                                         );
                 if (ret)
@@ -2667,8 +2644,7 @@ stripe_first_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                         ret = stripe_xattr_request_build (this, dict,
                                                           local->stripe_size,
-                                                          priv->child_count,
-                                                          i, 0, priv->nodes_down ? priv->bad_node_index : -1);
+                                                          0, priv->nodes_down ? priv->bad_node_index : -1);
                         if (ret)
                                 gf_log (this->name, GF_LOG_ERROR,
                                         "failed to build xattr request");
@@ -2763,8 +2739,7 @@ stripe_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         ret = stripe_xattr_request_build (this, dict,
                                           local->stripe_size,
-                                          priv->child_count,
-                                          i, 0, priv->nodes_down ? priv->bad_node_index : -1);
+                                          0, priv->nodes_down ? priv->bad_node_index : -1);
         if (ret)
                 gf_log (this->name, GF_LOG_ERROR,
                         "failed to build xattr request");
@@ -5546,7 +5521,7 @@ unlock:
 
         xattrs = dict_new ();
         if (xattrs)
-                (void) stripe_xattr_request_build (this, xattrs, 0, 0, 0, 0, 0);
+                (void) stripe_xattr_request_build (this, xattrs, 0, 0, 0);
         count = op_ret;
         ret = 0;
         list_for_each_entry_safe (local_entry, tmp_entry,
