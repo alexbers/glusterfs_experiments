@@ -75,7 +75,40 @@
                         goto label;                                 \
                 }                                                   \
         } while (0);
-        
+
+/* fill local call_count and launch the code for all alive children */        
+#define for_each_alive_child(child,priv,local,fctx, err_label)      \
+        uint8_t __bad_node_index = priv->bad_node_index;            \
+        uint8_t __nodes_down = priv->nodes_down;                    \
+        int32_t __skip_node_index = -1;                             \
+        int     __i = 0;                                            \
+        if(__nodes_down==0)                                         \
+                __skip_node_index = -1;                             \
+        else if(__nodes_down==1)                                    \
+                __skip_node_index = __bad_node_index;               \
+        else {                                                      \
+                gf_log (this->name, GF_LOG_ERROR,"returning ENOTCONN");                   \
+                op_errno = ENOTCONN;                                \
+                goto err_label;                                     \
+        }                                                           \
+        int32_t __fctx_bad_node_index = fctx->bad_node_index;       \
+        if (__fctx_bad_node_index!=-1){                             \
+                if(__skip_node_index==-1)                           \
+                        __skip_node_index=__fctx_bad_node_index;    \
+                else if (__bad_node_index!=__fctx_bad_node_index) { \
+                        gf_log (this->name, GF_LOG_ERROR,"returning ENOTCONN 2 %d %d", __bad_node_index,__fctx_bad_node_index);                   \
+                        op_errno = ENOTCONN;                        \
+                        goto err_label;                             \
+                }                                                   \
+        }                                                           \
+                                                                    \
+        local->call_count = priv->child_count;                      \
+        if(__skip_node_index!=-1)                                   \
+                local->call_count-=1;                               \
+        for (__i=0,child=priv->xl_array[0];                         \
+             __i<priv->child_count;                                 \
+             child=priv->xl_array[++__i])                           \
+                if(__i != __skip_node_index)                      
         
 typedef struct stripe_xattr_sort {
         int32_t  pos;
