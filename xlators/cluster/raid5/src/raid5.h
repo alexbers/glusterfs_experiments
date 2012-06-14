@@ -105,7 +105,7 @@ struct stripe_private {
         uint8_t                 bad_node_index; /* if nodes_down > 0 */
         int8_t                  first_child_down;
         int8_t                  child_count;
-        int8_t                 *state; /* Current state of child node */
+        int8_t                 *child_up; /* Current state of child node */
         char                    vol_uuid[UUID_SIZE + 1];
 };
 
@@ -225,6 +225,9 @@ struct stripe_local {
         int                  xflag;
         mode_t               umask;
 
+        int8_t              *child_up; /* Current state of child node */
+        
+        
         int32_t              bad_node_index; /* equals -1 if all nodes are good */
         
         unsigned char       *checksum_xor_with; // always has stripe_size

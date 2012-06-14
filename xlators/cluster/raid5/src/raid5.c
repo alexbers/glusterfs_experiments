@@ -115,6 +115,9 @@ stripe_local_wipe (stripe_local_t *local)
 
         if (local->xdata)
                 dict_unref (local->xdata);
+        
+        if (local->child_up)
+                GF_FREE (local->child_up);
 
 out:
         return;
@@ -678,7 +681,7 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         local->call_count = priv->child_count - priv->nodes_down;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND_COOKIE (frame, stripe_lookup_cbk, i, 
                                 priv->xl_array[i],
                                 priv->xl_array[i]->fops->lookup, loc, xdata);
@@ -785,7 +788,7 @@ stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
         local->call_count = priv->child_count - priv->nodes_down;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_stat_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->stat, loc, NULL);
                   }
@@ -1006,7 +1009,7 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->wind_count= priv->child_count - priv->nodes_down;
 
                         for(idx=0;idx<priv->child_count;idx++) {
-                                if(priv->state[idx]) {
+                                if(priv->child_up[idx]) {
                                         STACK_WIND (frame, stripe_truncate_setattr_cbk, priv->xl_array[idx],
                                                 priv->xl_array[idx]->fops->setxattr, &local->loc, dict, ATTR_ROOT, NULL);
                                 }
@@ -1081,7 +1084,7 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
         new_offset = (new_offset + priv->child_count - 1) / priv->child_count * priv->child_count;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_truncate_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->truncate, loc, new_offset, NULL);
                   }
@@ -1203,7 +1206,7 @@ stripe_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
         local->call_count = priv->child_count - priv->nodes_down;
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_setattr_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->setattr, loc, stbuf,valid,NULL);
                   }
@@ -2586,7 +2589,7 @@ stripe_first_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
            files are created */
 
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         if (is_first) {
                           is_first = 0;
                           continue; /* Skip first */
@@ -2700,7 +2703,7 @@ stripe_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
                         "failed to build xattr request");
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_first_create_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->create, loc, flags, mode,
                                 umask,fd, dict);
@@ -2819,7 +2822,7 @@ stripe_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
                                                      priv->block_size);
                 
         for (i=0; i<priv->child_count; i++) {
-                if(priv->state[i]) {
+                if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_open_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->open, &local->loc, 
                                 local->flags, local->fd, xdata);
@@ -2905,7 +2908,7 @@ stripe_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_
         local->fd = fd_ref (fd);
 
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_opendir_cbk ,priv->xl_array[i],
                                 priv->xl_array[i]->fops->opendir, loc, fd, NULL);
                   }
@@ -3072,7 +3075,7 @@ stripe_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
         local->call_count = priv->child_count - priv->nodes_down;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_flush_cbk,priv->xl_array[i],
                                 priv->xl_array[i]->fops->flush, fd, NULL);
                   }
@@ -3175,7 +3178,7 @@ stripe_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, dict
         local->call_count = priv->child_count - priv->nodes_down;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_fsync_cbk,priv->xl_array[i],
                                 priv->xl_array[i]->fops->fsync, fd, flags, NULL);
                   }
@@ -3280,7 +3283,7 @@ stripe_fstat (call_frame_t *frame,
         local->call_count = priv->child_count - priv->nodes_down;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_fstat_cbk,priv->xl_array[i],
                                 priv->xl_array[i]->fops->fstat, fd, NULL);
                   }
@@ -3419,7 +3422,7 @@ stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                         local->wind_count= priv->child_count - priv->nodes_down;
 
                         for(idx=0;idx<priv->child_count;idx++) {
-                                if(priv->state[idx]) {
+                                if(priv->child_up[idx]) {
                                         STACK_WIND (frame, stripe_ftruncate_setattr_cbk, priv->xl_array[idx],
                                                 priv->xl_array[idx]->fops->fsetxattr, local->fd, dict, ATTR_ROOT, NULL);
                                 }
@@ -5012,13 +5015,13 @@ notify (xlator_t *this, int32_t event, void *data, ...)
                         if (data == priv->xl_array[i])
                                 break;
                 }
-                priv->state[i] = 1;
+                priv->child_up[i] = 1;
                 
                 gf_log (this->name, GF_LOG_WARNING,
                         "BAY: child %d is up", (int) i);
 
                 for (i = 0; i < priv->child_count; i++) {
-                        if (!priv->state[i]) {
+                        if (!priv->child_up[i]) {
                                 down_client++;
                                 last_down_node = i;
                         }
@@ -5043,14 +5046,14 @@ notify (xlator_t *this, int32_t event, void *data, ...)
                         if (data == priv->xl_array[i])
                                 break;
                 }
-                priv->state[i] = 0;
+                priv->child_up[i] = 0;
                 last_down_node = i;
                 
                 gf_log (this->name, GF_LOG_WARNING,
                         "BAY: child %d is down", (int) i);
                 
                 for (i = 0; i < priv->child_count; i++) {
-                        if (!priv->state[i])
+                        if (!priv->child_up[i])
                                 down_client++;
                 }
 
@@ -5255,16 +5258,12 @@ int
 stripe_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
                   dict_t *dict, int flags, dict_t *xdata)
 {
-        //data_pair_t    *trav     = NULL;
         int32_t         op_ret   = -1;
         int32_t         op_errno = EINVAL;
 
         VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
         VALIDATE_OR_GOTO (fd, err);
-
-        //GF_IF_INTERNAL_XATTR_GOTO ("trusted.*stripe*", dict,
-        //                           trav, op_errno, err);
 
         STACK_WIND (frame, stripe_fsetxattr_cbk,
                     FIRST_CHILD(this),
@@ -5535,7 +5534,7 @@ stripe_readdirp (call_frame_t *frame, xlator_t *this,
                 goto err;
 
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_readdirp_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->readdirp, fd, size, off, xdata);
                         break;
@@ -5571,7 +5570,7 @@ stripe_readdir(call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         priv = this->private;
         
         for (i=0; i<priv->child_count; i++) {
-                  if(priv->state[i]) {
+                  if(priv->child_up[i]) {
                         STACK_WIND (frame, stripe_readdir_cbk, priv->xl_array[i],
                                 priv->xl_array[i]->fops->readdir, fd, size, offset, NULL);
                         break;
@@ -5673,9 +5672,9 @@ init (xlator_t *this)
         if (!priv->xl_array)
                 goto out;
 
-        priv->state = GF_CALLOC (count, sizeof (int8_t),
+        priv->child_up = GF_CALLOC (count, sizeof (int8_t),
                                  gf_stripe_mt_int8_t);
-        if (!priv->state)
+        if (!priv->child_up)
                 goto out;
 
         priv->child_count = count;
@@ -5942,8 +5941,6 @@ stripe_internal_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                               dict_t *xdata)
 {
         char        size_key[256]  = {0,};
-        char        index_key[256] = {0,};
-        char        count_key[256] = {0,};
         char        real_size_key[256] = {0,};
 
         VALIDATE_OR_GOTO (frame, out);
@@ -5953,13 +5950,9 @@ stripe_internal_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
             goto out;
 
         sprintf (size_key, "trusted.%s.stripe-size", this->name);
-        sprintf (count_key, "trusted.%s.stripe-count", this->name);
-        sprintf (index_key, "trusted.%s.stripe-index", this->name);
         sprintf (real_size_key, "trusted.%s.real-size", this->name);
 
         dict_del (xattr, size_key);
-        dict_del (xattr, count_key);
-        dict_del (xattr, index_key);
         dict_del (xattr, real_size_key);
         
 out:
