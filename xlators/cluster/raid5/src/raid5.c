@@ -27,7 +27,6 @@
  *    We don't check checksums while reading the file, we do that only when
  *    one node is down.
  */
-//#include <attr/attributes.h>
 #include <fnmatch.h>
 
 #include "raid5.h"
@@ -256,7 +255,6 @@ stripe_xattr_request_build (xlator_t *this, dict_t *dict, uint64_t stripe_size,
                 goto out;
         }
         
-        
 out:
         return ret;
 }
@@ -298,10 +296,11 @@ stripe_sh_chown_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int             callcnt = -1;
         stripe_local_t *local   = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
 
         local = frame->local;
 
@@ -327,11 +326,13 @@ stripe_sh_make_entry_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         call_frame_t    *prev = NULL;
 
-        if (!frame || !frame->local || !cookie || !this) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         prev  = cookie;
         local = frame->local;
 
@@ -356,10 +357,9 @@ stripe_entry_self_heal (call_frame_t *frame, xlator_t *this,
         int32_t           op_errno = EINVAL;
 
         
-        if (!local || !this || !frame) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (local, out);
 
         if (!(IA_ISREG (local->stbuf.ia_type) ||
               IA_ISDIR (local->stbuf.ia_type)))
@@ -489,10 +489,11 @@ stripe_lookup_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int             ret         = 0;
         long            node_index  = -1;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
         
         node_index = (long)cookie;
         local = frame->local;
@@ -621,8 +622,8 @@ stripe_lookup (call_frame_t *frame, xlator_t *this, loc_t *loc,
         int               ret      = 0;
         long              i        = 0;
 
-        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
@@ -699,16 +700,14 @@ stripe_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+        VALIDATE_OR_GOTO(this,out);
+        VALIDATE_OR_GOTO(frame,out);
+        VALIDATE_OR_GOTO(frame->local,out);
+        
         local = frame->local;
 
         LOCK (&frame->lock);
-        {
-                
+        {                
                 callcnt = --local->call_count;
 
                 if (op_ret == -1) {
@@ -753,12 +752,14 @@ stripe_stat (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
         stripe_fd_ctx_t  *fctx     = NULL;
         xlator_t         *child = NULL;
         
-        VALIDATE_OR_GOTO (frame, err);
+        
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
 
+        
         priv = this->private;
         
         RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
@@ -792,11 +793,16 @@ stripe_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         stripe_local_t *local = NULL;
         int32_t         callcnt = 0;
+        stripe_private_t *priv = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO(this,out);
+        VALIDATE_OR_GOTO(frame,out);
+        VALIDATE_OR_GOTO(frame->local,out);
+
+        
+        priv = this->private;
+        
         local = frame->local;
 
         LOCK(&frame->lock);
@@ -825,6 +831,15 @@ stripe_statfs_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         UNLOCK (&frame->lock);
         
         if (!callcnt) {
+                if(local->op_ret==0) {
+                        struct statvfs *dict_buf = &local->statvfs_buf;
+                        dict_buf->f_blocks -= dict_buf->f_blocks / priv->child_count;
+                        dict_buf->f_bfree -= dict_buf->f_bfree / priv->child_count;
+                        dict_buf->f_bavail -= dict_buf->f_bavail / priv->child_count;
+                        dict_buf->f_ffree -= dict_buf->f_ffree / priv->child_count;
+                        dict_buf->f_favail -= dict_buf->f_favail / priv->child_count;
+                }
+                
                 STRIPE_STACK_UNWIND (statfs, frame, local->op_ret,
                                      local->op_errno, &local->statvfs_buf, NULL);
         }
@@ -840,10 +855,12 @@ stripe_statfs (call_frame_t *frame, xlator_t *this, loc_t *loc, dict_t *xdata)
         stripe_private_t *priv = NULL;
         int32_t           op_errno = EINVAL;
 
-        VALIDATE_OR_GOTO (frame, err);
+        
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
 
+        
         trav = this->children;
         priv = this->private;
                
@@ -871,13 +888,15 @@ stripe_truncate_setattr_cbk (call_frame_t *frame, void *cookie,
                       xlator_t *this, int op_ret, int op_errno, dict_t *xdata)
 {
         stripe_local_t *local = NULL;
+        int32_t         callcnt = 0;
 
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+        
         local = frame->local;
         
         if(op_ret!=0) {
@@ -887,11 +906,11 @@ stripe_truncate_setattr_cbk (call_frame_t *frame, void *cookie,
 
         LOCK(&frame->lock);
         {
-                local->wind_count--;
+                callcnt=--local->call_count;
         }
         UNLOCK(&frame->lock);
         
-        if(local->wind_count==0) {
+        if(!callcnt) {
                 STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
                                 local->op_errno, &local->pre_buf,
                                 &local->post_buf, NULL);
@@ -911,22 +930,22 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int8_t            is_first = 0;
         stripe_local_t   *local    = NULL;
         stripe_fd_ctx_t  *fctx     = NULL;
-        int               idx      = 0;
         dict_t           *dict     = NULL;
         stripe_private_t *priv     = NULL;
         int               ret      = 0;
+        xlator_t         *child = NULL;      
 
-        if (!this || !this->private || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (((struct stripe_local *)(frame->local))->fctx, out);        
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         priv = this->private;
         local = frame->local;
-        
-        VALIDATE_OR_GOTO (local, out);
-        VALIDATE_OR_GOTO (local->fctx, out);
-        
         fctx = local->fctx;
         
         LOCK (&frame->lock);
@@ -963,43 +982,38 @@ stripe_truncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (!callcnt) {
                 if (local->failed)
-                        local->op_ret = -1;
-
+                        goto err;
                 
-                if (local->op_ret != -1) {
-                        local->pre_buf.ia_blocks  = local->prebuf_blocks;
-                        local->pre_buf.ia_size    = local->prebuf_size;
-                        local->post_buf.ia_blocks = local->postbuf_blocks;
-                        local->post_buf.ia_size   = local->postbuf_size;
-                        
-                        dict = dict_new();
-                        if (!dict) {
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "failed to allocate dict %s", local->loc.path);
-                        }
-                        
-                        fctx->real_size = local->offset;
-
-                        ret = stripe_xattr_request_build_short (this, dict, fctx->real_size, fctx->bad_node_index);
-                        if (ret)
-                                gf_log (this->name, GF_LOG_ERROR,
-                                        "Failed to build short xattr request");
-                                
-                        local->wind_count= priv->child_count - priv->nodes_down;
-
-                        for(idx=0;idx<priv->child_count;idx++) {
-                                if(priv->child_up[idx]) {
-                                        STACK_WIND (frame, stripe_truncate_setattr_cbk, priv->xl_array[idx],
-                                                priv->xl_array[idx]->fops->setxattr, &local->loc, dict, ATTR_ROOT, NULL);
-                                }
-                        }
-                        dict_unref(dict);
-                } else {
-                        STRIPE_STACK_UNWIND (truncate, frame, local->op_ret,
-                                        local->op_errno, &local->pre_buf,
-                                       &local->post_buf, NULL);
+                local->pre_buf.ia_blocks  = local->prebuf_blocks;
+                local->pre_buf.ia_size    = local->prebuf_size;
+                local->post_buf.ia_blocks = local->postbuf_blocks;
+                local->post_buf.ia_size   = local->postbuf_size;
+                
+                dict = dict_new();
+                if (!dict) {
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "failed to allocate dict %s", local->loc.path);
                 }
+                
+                fctx->real_size = local->offset;
+
+                ret = stripe_xattr_request_build_short (this, dict, fctx->real_size, fctx->bad_node_index);
+                if (ret)
+                        gf_log (this->name, GF_LOG_ERROR,
+                                "Failed to build short xattr request");
+                        
+                for_each_alive_child(child,priv,local,fctx,err) {
+                        STACK_WIND (frame, stripe_truncate_setattr_cbk, child,
+                                child->fops->setxattr, &local->loc, dict, ATTR_ROOT, NULL);                                
+                }
+                dict_unref(dict);
         }
+        goto out;
+err:
+        STRIPE_STACK_UNWIND (truncate, frame, -1,
+                        op_errno, &local->pre_buf,
+                        &local->post_buf, NULL);
+
 out:
         return 0;
 }
@@ -1012,15 +1026,16 @@ stripe_truncate (call_frame_t *frame, xlator_t *this, loc_t *loc, off_t offset, 
         stripe_fd_ctx_t  *fctx = NULL;
         int32_t           op_errno = EINVAL;
         off_t             new_offset;
-        xlator_t         *child = NULL;
+        xlator_t         *child = NULL;      
         
         
-        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
 
+        
         priv = this->private;
 
         inode_ctx_get(loc->inode, this, (uint64_t *) &fctx);
@@ -1074,11 +1089,13 @@ stripe_setattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -1140,12 +1157,13 @@ stripe_setattr (call_frame_t *frame, xlator_t *this, loc_t *loc,
         stripe_fd_ctx_t  *fctx = NULL;
 
         
-        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
 
+        
         priv = this->private;
 
         inode_ctx_get(loc->inode, this, (uint64_t *) &fctx);
@@ -1180,11 +1198,13 @@ stripe_fsetattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         xlator_list_t    *trav = NULL;
         int32_t           op_errno = EINVAL;
 
-        VALIDATE_OR_GOTO (frame, err);
+        
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (fd, err);
         VALIDATE_OR_GOTO (fd->inode, err);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -1217,10 +1237,12 @@ stripe_stack_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
 
         prev  = cookie;
         local = frame->local;
@@ -1289,12 +1311,12 @@ stripe_first_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         xlator_list_t  *trav = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                op_errno = EINVAL;
-                goto unwind;
-        }
-
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
+        
         if (op_ret == -1) {
                 goto unwind;
         }
@@ -1323,6 +1345,7 @@ stripe_first_rename_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 unwind:
         STRIPE_STACK_UNWIND (rename, frame, -1, op_errno, buf, preoldparent,
                              postoldparent, prenewparent, postnewparent, NULL);
+out:
         return 0;
 }
 
@@ -1335,13 +1358,15 @@ stripe_rename (call_frame_t *frame, xlator_t *this, loc_t *oldloc,
         xlator_list_t    *trav = NULL;
         int32_t           op_errno = EINVAL;
 
-        VALIDATE_OR_GOTO (frame, err);
+
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (oldloc, err);
         VALIDATE_OR_GOTO (oldloc->path, err);
         VALIDATE_OR_GOTO (oldloc->inode, err);
         VALIDATE_OR_GOTO (newloc, err);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -1379,18 +1404,20 @@ stripe_first_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local   = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
+        
         prev  = cookie;
         local = frame->local;
 
         if (op_ret == -1) {
                 gf_log (this->name, GF_LOG_DEBUG, "%s returned %s",
                         prev->this->name, strerror (op_errno));
-                goto out;
+                goto err;
         }
         local->op_ret = 0;
         local->preparent  = *preparent;
@@ -1401,9 +1428,9 @@ stripe_first_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         STRIPE_STACK_UNWIND(unlink, frame, local->op_ret, local->op_errno,
                             &local->preparent, &local->postparent, NULL);
         return 0;
-out:
+err:
         STRIPE_STACK_UNWIND (unlink, frame, -1, op_errno, NULL, NULL, NULL);
-
+out:
         return 0;
 }
 
@@ -1419,11 +1446,13 @@ stripe_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local   = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         prev  = cookie;
         local = frame->local;
 
@@ -1446,16 +1475,16 @@ stripe_unlink_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (callcnt == 1) {
                 if (local->failed) {
                         op_errno = local->op_errno;
-                        goto out;
+                        goto err;
                 }
                 STACK_WIND(frame, stripe_first_unlink_cbk, FIRST_CHILD (this),
                            FIRST_CHILD (this)->fops->unlink, &local->loc, 
                            local->xflag, local->xdata);
         }
         return 0;
-out:
+err:
         STRIPE_STACK_UNWIND (unlink, frame, -1, op_errno, NULL, NULL, NULL);
-
+out:
         return 0;
 }
 
@@ -1468,12 +1497,14 @@ stripe_unlink (call_frame_t *frame, xlator_t *this, loc_t *loc,
         stripe_private_t *priv = NULL;
         int32_t           op_errno = EINVAL;
 
-        VALIDATE_OR_GOTO (frame, err);
+        
         VALIDATE_OR_GOTO (this, err);
+        VALIDATE_OR_GOTO (frame, err);
         VALIDATE_OR_GOTO (loc, err);
         VALIDATE_OR_GOTO (loc->path, err);
         VALIDATE_OR_GOTO (loc->inode, err);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -1521,11 +1552,11 @@ stripe_first_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                op_errno = EINVAL;
-                goto err;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
 
         if (op_ret == -1) {
                 goto err;
@@ -1548,6 +1579,7 @@ stripe_first_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         return 0;
 err:
         STRIPE_STACK_UNWIND (rmdir, frame, op_ret, op_errno, NULL, NULL, NULL);
+out:
         return 0;
 
 }
@@ -1559,14 +1591,14 @@ stripe_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         int32_t         callcnt = 0;
         stripe_local_t *local   = NULL;
-        call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
-        prev  = cookie;
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -1574,8 +1606,8 @@ stripe_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 callcnt = --local->call_count;
 
                 if (op_ret == -1) {
-                        gf_log (this->name, GF_LOG_DEBUG, "%s returned %s",
-                                prev->this->name, strerror (op_errno));
+                        gf_log (this->name, GF_LOG_DEBUG, "fop error %s",
+                                strerror (op_errno));
                         if (op_errno != ENOENT)
                                 local->failed = 1;
                 }
@@ -1584,14 +1616,15 @@ stripe_rmdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         if (callcnt == 1) {
                 if (local->failed)
-                        goto out;
+                        goto err;
                 STACK_WIND (frame, stripe_first_rmdir_cbk, FIRST_CHILD (this),
                             FIRST_CHILD (this)->fops->rmdir, &local->loc,
                             local->flags, NULL);
         }
         return 0;
-out:
+err:
         STRIPE_STACK_UNWIND (rmdir, frame, -1, op_errno, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -1603,12 +1636,14 @@ stripe_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags, dict_t
         stripe_private_t *priv = NULL;
         int32_t           op_errno = EINVAL;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -1636,6 +1671,7 @@ stripe_rmdir (call_frame_t *frame, xlator_t *this, loc_t *loc, int flags, dict_t
         return 0;
 err:
         STRIPE_STACK_UNWIND (rmdir, frame, -1, op_errno, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -1649,11 +1685,12 @@ stripe_mknod_ifreg_fail_unlink_cbk (call_frame_t *frame, void *cookie,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+       
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -1683,14 +1720,13 @@ stripe_mknod_ifreg_setxattr_cbk (call_frame_t *frame, void *cookie,
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
         xlator_list_t    *trav = NULL;
-        call_frame_t     *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+       
 
-        prev  = cookie;
         priv  = this->private;
         local = frame->local;
 
@@ -1700,8 +1736,7 @@ stripe_mknod_ifreg_setxattr_cbk (call_frame_t *frame, void *cookie,
 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->op_ret = -1;
                         local->op_errno = op_errno;
                 }
@@ -1743,11 +1778,13 @@ stripe_mknod_ifreg_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         xlator_list_t    *trav = NULL;
         stripe_fd_ctx_t  *fctx = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
+        
         prev  = cookie;
         priv  = this->private;
         local = frame->local;
@@ -1847,19 +1884,19 @@ stripe_mknod_first_ifreg_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
-        call_frame_t     *prev = NULL;
         xlator_list_t    *trav = NULL;
         int               i    = 1;
         dict_t           *dict           = NULL;
         int               ret            = 0;
         int               need_unref     = 0;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
-        prev  = cookie;
+
         priv  = this->private;
         local = frame->local;
         trav = this->children;
@@ -1867,11 +1904,11 @@ stripe_mknod_first_ifreg_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         local->call_count--;
 
         if (op_ret == -1) {
-                gf_log (this->name, GF_LOG_DEBUG, "%s returned error %s",
-                        prev->this->name, strerror (op_errno));
+                gf_log (this->name, GF_LOG_DEBUG, "fop error %s",
+                        strerror (op_errno));
                 local->failed = 1;
                 local->op_errno = op_errno;
-                goto out;
+                goto err;
         }
 
         local->op_ret = op_ret;
@@ -1920,9 +1957,9 @@ stripe_mknod_first_ifreg_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         return 0;
 
-out:
-
+err:
        STRIPE_STACK_UNWIND (mknod, frame, op_ret, op_errno, NULL, NULL, NULL, NULL, NULL);
+out:
        return 0;
 }
 
@@ -1946,17 +1983,18 @@ stripe_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         stripe_private_t *priv           = NULL;
         stripe_local_t   *local          = NULL;
         int32_t           op_errno       = EINVAL;
-        //int32_t           i              = 0;
         dict_t           *dict           = NULL;
         int               ret            = 0;
         int               need_unref     = 0;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
 
         if (priv->first_child_down) {
@@ -2029,6 +2067,7 @@ stripe_mknod (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         return 0;
 err:
         STRIPE_STACK_UNWIND (mknod, frame, -1, op_errno, NULL, NULL, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -2043,11 +2082,13 @@ stripe_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t  *local   = NULL;
         call_frame_t    *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+
+        
         prev  = cookie;
         local = frame->local;
 
@@ -2108,15 +2149,14 @@ stripe_first_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                   struct iatt *postparent, dict_t *xdata)
 {
         stripe_local_t  *local   = NULL;
-        call_frame_t    *prev = NULL;
         xlator_list_t        *trav = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
 
-        prev  = cookie;
+        
         local = frame->local;
         trav = this->children;
 
@@ -2124,10 +2164,10 @@ stripe_first_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         trav = trav->next;   /* skip first child */
 
         if (op_ret == -1) {
-                gf_log (this->name, GF_LOG_DEBUG, "%s returned error %s",
-                        prev->this->name, strerror (op_errno));
+                gf_log (this->name, GF_LOG_DEBUG, "fop error %s",
+                        strerror (op_errno));
                 local->op_errno = op_errno;
-                goto out;
+                goto err;
         }
 
         local->op_ret = 0;
@@ -2152,10 +2192,10 @@ stripe_first_mkdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 trav = trav->next;
         }
         return 0;
-out:
+err:
         STRIPE_STACK_UNWIND (mkdir, frame, -1, op_errno, NULL, NULL, NULL,
                       NULL, NULL);
-
+out:
         return 0;
 
 }
@@ -2170,11 +2210,12 @@ stripe_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         xlator_list_t    *trav = NULL;
         int32_t           op_errno = 1;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
         priv = this->private;
         trav = this->children;
@@ -2203,6 +2244,7 @@ stripe_mkdir (call_frame_t *frame, xlator_t *this, loc_t *loc, mode_t mode,
         return 0;
 err:
         STRIPE_STACK_UNWIND (mkdir, frame, -1, op_errno, NULL, NULL, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -2217,11 +2259,13 @@ stripe_link_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t  *local   = NULL;
         call_frame_t    *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
-
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
+        
         prev  = cookie;
         local = frame->local;
 
@@ -2291,12 +2335,14 @@ stripe_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc, 
         stripe_private_t *priv = NULL;
         int32_t           op_errno = 1;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (oldloc, err);
-        VALIDATE_OR_GOTO (oldloc->path, err);
-        VALIDATE_OR_GOTO (oldloc->inode, err);
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (oldloc, out);
+        VALIDATE_OR_GOTO (oldloc->path, out);
+        VALIDATE_OR_GOTO (oldloc->inode, out);
+
+        
         priv = this->private;
         trav = this->children;
 
@@ -2324,6 +2370,7 @@ stripe_link (call_frame_t *frame, xlator_t *this, loc_t *oldloc, loc_t *newloc, 
         return 0;
 err:
         STRIPE_STACK_UNWIND (link, frame, -1, op_errno, NULL, NULL, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -2336,10 +2383,11 @@ stripe_create_fail_unlink_cbk (call_frame_t *frame, void *cookie,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
 
         local = frame->local;
 
@@ -2369,15 +2417,15 @@ stripe_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
         stripe_fd_ctx_t  *fctx = NULL;
-        call_frame_t     *prev = NULL;
         xlator_list_t    *trav = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
-        prev  = cookie;
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+        
+
         priv  = this->private;
         local = frame->local;
 
@@ -2387,8 +2435,7 @@ stripe_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->failed = 1;
                         local->op_errno = op_errno;
                 }
@@ -2481,11 +2528,13 @@ stripe_first_create_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t           need_unref = 0;
         int32_t           ret  = -1;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         priv  = this->private;
         local = frame->local;
         loc = &local->loc;
@@ -2592,15 +2641,16 @@ stripe_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
         int               ret            = 0;
         int               need_unref     = 0;
         int               i              = 0;
-
         dict_t           *dict           = NULL;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
+
+        
         priv = this->private;
 
         if (priv->nodes_down > 1 ) {
@@ -2670,6 +2720,7 @@ stripe_create (call_frame_t *frame, xlator_t *this, loc_t *loc,
 err:
         STRIPE_STACK_UNWIND (create, frame, -1, op_errno, NULL, NULL, NULL,
                              NULL, NULL, xdata);
+out:        
         return 0;
 }
 
@@ -2681,11 +2732,13 @@ stripe_open_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+
+        
         gf_log (this->name, GF_LOG_WARNING,
                 "BAY: openfile, open_cbk");
 
@@ -2734,15 +2787,16 @@ stripe_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
         int               i = 0;
-
         int32_t           op_errno = 1;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
 
         if (priv->nodes_down > 1 ) {
@@ -2785,6 +2839,7 @@ stripe_open (call_frame_t *frame, xlator_t *this, loc_t *loc,
 
 err:
         STRIPE_STACK_UNWIND (open, frame, -1, op_errno, NULL, NULL);
+out:
         return 0;
 }
 
@@ -2795,14 +2850,14 @@ stripe_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
-        call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
-        prev  = cookie;
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -2811,8 +2866,7 @@ stripe_opendir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->op_ret = -1;
                         local->op_errno = op_errno;
                 }
@@ -2837,15 +2891,16 @@ stripe_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_
         stripe_local_t   *local = NULL;
         stripe_private_t *priv = NULL;
         int32_t           op_errno = EINVAL;
-
         int32_t           i = 0;
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
 
         if (priv->nodes_down > 1 ) {
@@ -2869,6 +2924,7 @@ stripe_opendir (call_frame_t *frame, xlator_t *this, loc_t *loc, fd_t *fd, dict_
         return 0;
 err:
         STRIPE_STACK_UNWIND (opendir, frame, -1, op_errno, NULL, NULL);
+out:
         return 0;
 }
 
@@ -2880,11 +2936,13 @@ stripe_lk_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         prev  = cookie;
         local = frame->local;
 
@@ -2932,11 +2990,12 @@ stripe_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         gf_log (this->name, GF_LOG_WARNING, "BAY: lk" );
         
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         trav = this->children;
         priv = this->private;
 
@@ -2955,6 +3014,7 @@ stripe_lk (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t cmd,
         return 0;
 err:
         STRIPE_STACK_UNWIND (lk, frame, -1, op_errno, NULL, NULL);
+out:        
         return 0;
 }
 
@@ -2967,11 +3027,13 @@ stripe_flush_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local   = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         prev  = cookie;
         local = frame->local;
 
@@ -3012,11 +3074,13 @@ stripe_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
         int32_t           op_errno = 1;
         int               i = 0;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
+
+        
         priv = this->private;
 
         /* Initialization */
@@ -3036,6 +3100,7 @@ stripe_flush (call_frame_t *frame, xlator_t *this, fd_t *fd, dict_t *xdata)
         return 0;
 err:
         STRIPE_STACK_UNWIND (flush, frame, -1, op_errno, NULL);
+out:
         return 0;
 }
 
@@ -3049,11 +3114,13 @@ stripe_fsync_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local   = NULL;
         call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         prev = cookie;
         local = frame->local;
 
@@ -3115,11 +3182,13 @@ stripe_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, dict
         int               i = 0;
         int32_t           op_errno = 1;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         priv = this->private;
 
         /* Initialization */
@@ -3139,6 +3208,7 @@ stripe_fsync (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, dict
         return 0;
 err:
         STRIPE_STACK_UNWIND (fsync, frame, -1, op_errno, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -3149,11 +3219,12 @@ stripe_fstat_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -3204,11 +3275,13 @@ stripe_fstat (call_frame_t *frame,
         stripe_fd_ctx_t  *fctx = NULL;
         xlator_t         *child = NULL;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         inode_ctx_get (fd->inode, this, &tmp_fctx);
         if (!tmp_fctx) {
                 op_errno = EBADFD;
@@ -3232,6 +3305,7 @@ stripe_fstat (call_frame_t *frame,
         return 0;
 err:
         STRIPE_STACK_UNWIND (fstat, frame, -1, op_errno, NULL, NULL);
+out:
         return 0;
 }
 
@@ -3243,10 +3317,10 @@ stripe_ftruncate_setattr_cbk (call_frame_t *frame, void *cookie,
         stripe_local_t *local = NULL;
 
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
 
         local = frame->local;
         
@@ -3279,23 +3353,23 @@ stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t           callcnt  = 0;
         int8_t            is_first = 0;
         stripe_local_t   *local    = NULL;
-        call_frame_t     *prev     = NULL;
         stripe_fd_ctx_t  *fctx     = NULL;
         int               idx      = 0;
         dict_t           *dict     = NULL;
         stripe_private_t *priv     = NULL;
         int               ret      = 0;
 
-        if (!this || !this->private || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
-        prev  = cookie;
+
         priv = this->private;
         local = frame->local;
         
-        VALIDATE_OR_GOTO (local, out);
         VALIDATE_OR_GOTO (local->fctx, out);
         
         fctx = local->fctx;
@@ -3309,8 +3383,7 @@ stripe_ftruncate_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->op_errno = op_errno;
                         if ((op_errno != ENOENT) || is_first)
                                 local->failed = 1;
@@ -3390,11 +3463,13 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         xlator_t         *child = NULL;
         off_t             new_offset = 0; 
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         priv = this->private;
  
         inode_ctx_get(fd->inode, this, (uint64_t *) &fctx);
@@ -3424,6 +3499,7 @@ stripe_ftruncate (call_frame_t *frame, xlator_t *this, fd_t *fd, off_t offset, d
         return 0;
 err:
         STRIPE_STACK_UNWIND (ftruncate, frame, -1, op_errno, NULL, NULL, NULL);
+out:
         return 0;
 }
 
@@ -3434,14 +3510,13 @@ stripe_fsyncdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         int32_t         callcnt = 0;
         stripe_local_t *local   = NULL;
-        call_frame_t   *prev = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
 
-        prev  = cookie;
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -3450,12 +3525,9 @@ stripe_fsyncdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->op_errno = op_errno;
-                        if ((op_errno != ENOENT) ||
-                            (prev->this == FIRST_CHILD (this)))
-                                local->failed = 1;
+                        local->failed = 1;
                 }
                 if (op_ret >= 0)
                         local->op_ret = op_ret;
@@ -3482,11 +3554,13 @@ stripe_fsyncdir (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, d
         stripe_fd_ctx_t  *fctx = NULL;
         xlator_t         *child = NULL;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         priv = this->private;
 
         inode_ctx_get(fd->inode, this, (uint64_t *) &fctx);
@@ -3509,6 +3583,7 @@ stripe_fsyncdir (call_frame_t *frame, xlator_t *this, fd_t *fd, int32_t flags, d
         return 0;
 err:
         STRIPE_STACK_UNWIND (fsyncdir, frame, -1, op_errno, NULL);
+out:        
         return 0;
 }
 
@@ -3535,16 +3610,20 @@ finalize_readv(call_frame_t *frame, xlator_t *this,
         call_frame_t   *mframe = NULL;
         stripe_local_t *mlocal = NULL;
         stripe_local_t *local = NULL;
+
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
         
         local  = frame->local;
         
         mframe = local->orig_frame;
-        if (!mframe)
-                goto end;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto end;
+        VALIDATE_OR_GOTO (mlocal, out);
         
         for (index=0; index < mlocal->wind_count; index++) {
                 /* check whether each stripe returned
@@ -3702,7 +3781,7 @@ done:
         iobref_unref (tmp_iobref);
         if (final_vec)
                 GF_FREE (final_vec);
-end:
+out:
         return 0;
 }
 
@@ -3738,30 +3817,28 @@ stripe_bypassing_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int32_t          bytes_readed = -1;
         
         struct iobuf     *iobuf = NULL;
+
         
-        if (!this || !this->private || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto end;
-        }
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
         
         priv = this->private;
         
         local  = frame->local;
         mframe = local->orig_frame;
-        if (!mframe)
-                goto out;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mlocal, out);
 
         mmframe = mlocal->orig_frame;
-        if (!mmframe)
-                goto out;
+        VALIDATE_OR_GOTO (mmframe, out);
 
         mmlocal = mmframe->local;
-        if (!mmlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mmlocal, out);
 
         index  = local->node_index;
         orig_index = mlocal->node_index;
@@ -3869,13 +3946,12 @@ cleanup:
         if (mmlocal->call_count == mmlocal->wind_count)
                 finalize_readv(mframe, this,fctx);
         
-out:
         if (callcnt == mlocal->wind_count) {
                 STRIPE_STACK_DESTROY (mframe);                
         }
 
         STRIPE_STACK_DESTROY (frame);
-end:
+out:
         return 0;
 }
         
@@ -3896,21 +3972,20 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_local_t *local = NULL;
         stripe_fd_ctx_t  *fctx = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto end;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        
 
         local  = frame->local;
         index  = local->node_index;
         
         mframe = local->orig_frame;
-        if (!mframe)
-                goto out;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mlocal, out);
 
         //gf_log (this->name, GF_LOG_WARNING,
         //        "BAY: readv stripe_readv_cbk: index %d, op_ret=%d", 
@@ -3942,9 +4017,9 @@ stripe_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         if (callcnt == mlocal->wind_count)
                 finalize_readv(frame, this,fctx);
 
-out:
         STRIPE_STACK_DESTROY (frame);
-end:
+        
+out:
         return 0;
 }
 
@@ -3975,12 +4050,14 @@ stripe_readv (call_frame_t *frame, xlator_t *this, fd_t *fd,
         stripe_fd_ctx_t  *fctx = NULL;
         stripe_private_t *priv = NULL;
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (this->private, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         priv = this->private;
 
         if (priv->nodes_down > 1 ) {
@@ -4148,6 +4225,7 @@ err:
                 STRIPE_STACK_DESTROY (rrframe);
         
         STRIPE_STACK_UNWIND (readv, frame, -1, op_errno, NULL, 0, NULL, NULL, NULL);
+out:        
         return 0;
 }
 
@@ -4159,11 +4237,11 @@ stripe_writev_setattr_cbk (call_frame_t *frame, void *cookie,
         stripe_local_t *local = NULL;
 
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
 
+        
         local = frame->local;
         
         if(op_ret!=0) {
@@ -4204,16 +4282,15 @@ void stripe_prefinalize_writev(call_frame_t *frame,xlator_t *this) {
         int32_t           write_op_errno = EINVAL;
 
         
-        if (!this || !this->private || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
 
+        
         priv = this->private;
 
         local = frame->local;
-        if (!local)
-                goto out;
 
         fctx = local->fctx;
         
@@ -4271,31 +4348,26 @@ stripe_writev_chksum_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *th
         stripe_local_t *mlocal = NULL;
 
 
-        char              *checksum_data = NULL;
-
-        
+        char              *checksum_data = NULL;   
         int               callcnt = 0;
 
         //stripe_private_t *priv = NULL;
         
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
         
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
         //priv = this->private;
         
         local = frame->local;
 
         mframe = local->orig_frame;
-        if (!mframe)
-                goto out;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto out;
-
+        VALIDATE_OR_GOTO (mlocal, out);
 
         checksum_data = cookie;
         GF_FREE(checksum_data);
@@ -4306,7 +4378,7 @@ stripe_writev_chksum_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *th
         }
         UNLOCK(&mframe->lock);
         
-        if (callcnt == 0) {
+        if (!callcnt) {
                 //gf_log (this->name, GF_LOG_WARNING,
                 //        "BAY: stripe_writev_cbk unwinding,fctx->real_size=%d",
                 //        (int) fctx->real_size
@@ -4319,14 +4391,15 @@ stripe_writev_chksum_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *th
                 
         }
         
-        goto out;
+        goto free;
 err:
         STRIPE_STACK_UNWIND (writev, mframe, mlocal->op_ret,
                 mlocal->op_errno, &mlocal->pre_buf,
                 &mlocal->post_buf, NULL);
 
-out:
+free:
         STRIPE_STACK_DESTROY (frame);
+out:        
         return 0;
 }
 
@@ -4359,26 +4432,25 @@ stripe_writev_chksum_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *thi
         
         int               callcnt = 0;
 
-        if (!this || !this->private || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
 
         priv = this->private;
 
         local = frame->local;
 
         mframe = local->orig_frame;
-        if (!mframe)
-                goto out;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mlocal, out);
 
         fctx = mlocal->fctx;
-        if (!fctx)
-                goto out;
+        VALIDATE_OR_GOTO (fctx, out);
         
         node_index = local->checksum_blocknum_in_group % priv->child_count;
         
@@ -4489,7 +4561,6 @@ stripe_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 {
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
-        call_frame_t   *prev = NULL;
         stripe_fd_ctx_t  *fctx = NULL;
         int             idx;
 
@@ -4501,31 +4572,27 @@ stripe_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
 
         stripe_private_t *priv = NULL;
         
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
 
         priv = this->private;
-        
-        prev  = cookie;
         local = frame->local;
 
         mframe = local->orig_frame;
-        if (!mframe)
-                goto out;
+        VALIDATE_OR_GOTO (mframe, out);
 
         mlocal = mframe->local;
-        if (!mlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mlocal, out);
      
         mmframe = mlocal->orig_frame;
-        if (!mmframe)
-                goto out;
+        VALIDATE_OR_GOTO (mmframe, out);
 
         mmlocal = mmframe->local;
-        if (!mmlocal)
-                goto out;
+        VALIDATE_OR_GOTO (mmlocal, out);
 
         fctx = mmlocal->fctx;
 
@@ -4537,8 +4604,7 @@ stripe_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_DEBUG,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         if (op_errno==ENOTCONN) {
                                 if(fctx->bad_node_index==-1)
                                         fctx->bad_node_index=local->node_index;
@@ -4577,8 +4643,8 @@ stripe_writev_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                                 0, NULL);
         }
         
-out:
         STRIPE_STACK_DESTROY (frame);
+out:
         return 0;
 }
 
@@ -4643,10 +4709,11 @@ stripe_writev_readv_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         stripe_private_t *priv = NULL;
 
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (cookie, err);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (cookie, out);
 
+        
         priv = this->private;
         
         if(read_op_ret ==  -1 && read_op_errno != ENOENT) {
@@ -4860,7 +4927,7 @@ mem_clean:
                 GF_FREE (old_data);
         if(new_data)
                 GF_FREE (new_data);
-        
+out:
         return 0;
 }
 
@@ -4877,11 +4944,13 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
         struct saved_write_contex *wc = NULL; // we have to save write contex
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
+
+        
         priv = this->private;
 
         if (priv->nodes_down > 1 ) {
@@ -4915,6 +4984,7 @@ stripe_writev (call_frame_t *frame, xlator_t *this, fd_t *fd,
                       
 err:
         STRIPE_STACK_UNWIND (writev, frame, -1, op_errno, NULL, NULL, NULL);
+out:        
         return 0;
 }
 
@@ -4924,17 +4994,19 @@ stripe_forget (xlator_t *this, inode_t *inode)
         uint64_t          tmp_fctx = 0;
         stripe_fd_ctx_t  *fctx = NULL;
         
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (inode, out);
+        
         
         (void) inode_ctx_del (inode, this, &tmp_fctx);
         if (!tmp_fctx) {
-                goto err;
+                goto out;
         }
         fctx = (stripe_fd_ctx_t *)(long)tmp_fctx;
                 
         GF_FREE (fctx);
-err:
+out:
         return 0;
 }
 
@@ -5043,8 +5115,11 @@ set_stripe_block_size (xlator_t *this, stripe_private_t *priv, char *data)
         struct stripe_options *temp_stripeopt = NULL;
         struct stripe_options *stripe_opt = NULL;
 
-        if (!this || !priv || !data)
-                goto out;
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (priv, out);
+        VALIDATE_OR_GOTO (data, out);
+
 
         /* Get the pattern for striping.
            "option block-size *avi:10MB" etc */
@@ -5125,10 +5200,13 @@ stripe_readdirp_entry_stat_cbk (call_frame_t *frame, void *cookie, xlator_t *thi
         stripe_local_t *local = NULL;
         int32_t        done = 0;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log (this->name, GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+        VALIDATE_OR_GOTO (cookie, out);
+
+
         entry = cookie;
         local = frame->local;
         LOCK (&frame->lock);
@@ -5168,10 +5246,9 @@ stripe_setxattr_cbk (call_frame_t *frame, void *cookie,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
 
         local = frame->local;
 
@@ -5213,11 +5290,13 @@ stripe_setxattr (call_frame_t *frame, xlator_t *this,
         stripe_fd_ctx_t  *fctx     = NULL;
         xlator_t         *child = NULL;
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
         
         RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
@@ -5243,6 +5322,7 @@ stripe_setxattr (call_frame_t *frame, xlator_t *this,
 
 err:
         STRIPE_STACK_UNWIND (setxattr, frame, -1,  op_errno, NULL);
+out:
         return 0;
 }
 
@@ -5254,11 +5334,12 @@ stripe_fsetxattr_cbk (call_frame_t *frame, void *cookie,
         int32_t         callcnt = 0;
         stripe_local_t *local = NULL;
 
-        if (!this || !frame || !frame->local) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
+        
         local = frame->local;
 
         LOCK (&frame->lock);
@@ -5299,11 +5380,13 @@ stripe_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
         stripe_fd_ctx_t  *fctx     = NULL;
         xlator_t         *child = NULL;
         
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
-        VALIDATE_OR_GOTO (fd->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+        VALIDATE_OR_GOTO (fd->inode, out);
 
+        
         priv = this->private;
         
         RAID5_LOCAL_ALLOC_OR_GOTO(local,err);
@@ -5329,6 +5412,7 @@ stripe_fsetxattr (call_frame_t *frame, xlator_t *this, fd_t *fd,
 
 err:
         STRIPE_STACK_UNWIND (fsetxattr, frame, -1,  op_errno, NULL);
+out:
         return 0;
 }
 
@@ -5345,6 +5429,12 @@ stripe_readdirp_lookup_cbk (call_frame_t *frame, void *cookie,
         gf_dirent_t             *entry          = NULL;
         int                      done           = 0;
 
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
+        
         local = frame->local;
 
         entry = local->dirent;
@@ -5403,6 +5493,7 @@ unlock:
                 STRIPE_STACK_DESTROY (frame);
         }
 
+out:
         return 0;
 }
 
@@ -5412,7 +5503,6 @@ stripe_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                      gf_dirent_t *orig_entries, dict_t *xdata)
 {
         stripe_local_t *local = NULL;
-        call_frame_t   *prev = NULL;
         gf_dirent_t    *local_entry = NULL;
         int32_t        ret = -1;
         gf_dirent_t    *tmp_entry = NULL;
@@ -5427,13 +5517,14 @@ stripe_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         call_frame_t   *local_frame = NULL;
         stripe_local_t *local_ent = NULL;
 
-        if (!this || !frame || !frame->local || !cookie) {
-                gf_log ("stripe", GF_LOG_DEBUG, "possible NULL deref");
-                goto out;
-        }
+
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
+        
         gf_log ("stripe", GF_LOG_WARNING, "stripe_readdirp_cbk");
 
-        prev  = cookie;
         local = frame->local;
         trav = this->children;
         priv = this->private;
@@ -5444,8 +5535,7 @@ stripe_readdirp_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         {
                 if (op_ret == -1) {
                         gf_log (this->name, GF_LOG_WARNING,
-                                "%s returned error %s",
-                                prev->this->name, strerror (op_errno));
+                                "fop error %s", strerror (op_errno));
                         local->op_errno = op_errno;
                         local->op_ret = op_ret;
                         goto unlock;
@@ -5461,7 +5551,7 @@ unlock:
         UNLOCK (&frame->lock);
 
         if (op_ret == -1)
-                goto out;
+                goto unwind;
 
         xattrs = dict_new ();
         if (xattrs)
@@ -5485,7 +5575,7 @@ unlock:
 
                 inode = inode_new (local->fd->inode->table);
                 if (!inode)
-                        goto out;
+                        goto unwind;
 
                 loc.inode = inode;
                 loc.parent = local->fd->inode;
@@ -5497,7 +5587,7 @@ unlock:
                         if (ret != -1) {
                                 loc.path = path;
                         } else {
-                                goto out;
+                                goto unwind;
                         }
                 }
 
@@ -5531,10 +5621,10 @@ unlock:
                 }
                 inode_unref (loc.inode);
         }
-        goto out;
+        goto unwind;
 err:
         op_ret = -1;
-out:
+unwind:
         if (!count) {
                 /* all entries are directories */
                 frame->local = NULL;
@@ -5546,6 +5636,7 @@ out:
         }
         if (xattrs)
                 dict_unref (xattrs);
+out:        
         return 0;
 
 }
@@ -5560,10 +5651,12 @@ stripe_readdirp (call_frame_t *frame, xlator_t *this,
         int             op_errno = -1;
         int32_t         i = 0;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (fd, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -5600,7 +5693,7 @@ stripe_readdirp (call_frame_t *frame, xlator_t *this,
 err:
         op_errno = (op_errno == -1) ? errno : op_errno;
         STRIPE_STACK_UNWIND (readdir, frame, -1, op_errno, NULL, NULL);
-
+out:
         return 0;
 
 }
@@ -5610,8 +5703,11 @@ stripe_readdir_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                    int32_t op_ret, int32_t op_errno, gf_dirent_t *buf, 
                    dict_t *xdata)
 {
-        STRIPE_STACK_UNWIND (readdir, frame, op_ret, op_errno, buf, NULL);
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
 
+        STRIPE_STACK_UNWIND (readdir, frame, op_ret, op_errno, buf, NULL);
+out:
         return 0;
 }
 
@@ -5623,6 +5719,12 @@ stripe_readdir(call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
         stripe_private_t *priv = NULL;
         
         priv = this->private;
+      
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (fd, out);
+
         
         for (i=0; i<priv->child_count; i++) {
                   if(priv->child_up[i]) {
@@ -5632,6 +5734,7 @@ stripe_readdir(call_frame_t *frame, xlator_t *this, fd_t *fd, size_t size,
                   }
         }
 
+out:
         return 0;
 }
 
@@ -5854,6 +5957,7 @@ stripe_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         int                     call_cnt = 0;
         stripe_local_t         *local = NULL;
 
+        VALIDATE_OR_GOTO (this, out);
         VALIDATE_OR_GOTO (frame, out);
         VALIDATE_OR_GOTO (frame->local, out);
 
@@ -5866,7 +5970,7 @@ stripe_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
         UNLOCK (&frame->lock);
 
         if (!xattr || (op_ret < 0))
-                goto out;
+                goto err;
 
         local->op_ret = 0;
 
@@ -5876,12 +5980,12 @@ stripe_getxattr_cbk (call_frame_t *frame, void *cookie, xlator_t *this,
                 stripe_aggregate_xattr (local->xattr, xattr);
         }
 
-out:
+err:
         if (!call_cnt) {
                 STRIPE_STACK_UNWIND (getxattr, frame, local->op_ret, op_errno,
                                      local->xattr, xdata);
         }
-
+out:
         return 0;
 }
 
@@ -6030,6 +6134,11 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
         stripe_xattr_sort_t *xattr         = NULL;
         dict_t              *stripe_xattr  = NULL;
 
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (frame->local, out);
+
         if (!frame || !frame->local || !this) {
                 gf_log ("", GF_LOG_ERROR, "Possible NULL deref");
                 return ret;
@@ -6048,7 +6157,7 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
                 callcnt = --local->wind_count;
 
                 if (!dict || (op_ret < 0))
-                        goto out;
+                        goto err;
 
                 if (!local->xattr_list)
                         local->xattr_list = (stripe_xattr_sort_t *)
@@ -6059,7 +6168,7 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
                 if (local->xattr_list) {
                         ret = dict_get_str (dict, local->xsel, &xattr_val);
                         if (ret)
-                                goto out;
+                                goto err;
 
                         xattr = local->xattr_list + (int32_t) cky;
 
@@ -6071,7 +6180,7 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
                         local->xattr_total_len += xattr->xattr_len + 1;
                 }
         }
- out:
+ err:
         UNLOCK (&frame->lock);
 
         if (!callcnt) {
@@ -6112,7 +6221,7 @@ stripe_vgetxattr_cbk (call_frame_t *frame, void *cookie,
                 if (stripe_xattr)
                         dict_unref (stripe_xattr);
         }
-
+out:
         return ret;
 }
 
@@ -6128,12 +6237,14 @@ stripe_getxattr (call_frame_t *frame, xlator_t *this,
         xlator_t         **sub_volumes;
         int                ret      = 0;
 
-        VALIDATE_OR_GOTO (frame, err);
-        VALIDATE_OR_GOTO (this, err);
-        VALIDATE_OR_GOTO (loc, err);
-        VALIDATE_OR_GOTO (loc->path, err);
-        VALIDATE_OR_GOTO (loc->inode, err);
+        
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (frame, out);
+        VALIDATE_OR_GOTO (loc, out);
+        VALIDATE_OR_GOTO (loc->path, out);
+        VALIDATE_OR_GOTO (loc->inode, out);
 
+        
         priv = this->private;
         trav = this->children;
 
@@ -6257,6 +6368,7 @@ stripe_getxattr (call_frame_t *frame, xlator_t *this,
 
 err:
         STRIPE_STACK_UNWIND (getxattr, frame, -1, op_errno, NULL, NULL);
+out:        
         return 0;
 }
 
@@ -6272,9 +6384,10 @@ stripe_priv_dump (xlator_t *this)
 
         GF_VALIDATE_OR_GOTO ("stripe", this, out);
 
+        VALIDATE_OR_GOTO (this, out);
+        VALIDATE_OR_GOTO (this->private, out);
+
         priv = this->private;
-        if (!priv)
-                goto out;
 
         ret = TRY_LOCK (&priv->lock);
         if (ret != 0)
